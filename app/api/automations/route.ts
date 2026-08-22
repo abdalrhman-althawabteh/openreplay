@@ -27,6 +27,8 @@ const createAutomationSchema = z
     keywords: z.array(z.string().min(1).max(50)).max(10).optional().default([]),
     matchAnyWord: z.boolean().optional().default(false),
     dmTriggerEnabled: z.boolean().optional().default(false),
+    storyReplyTriggerEnabled: z.boolean().optional().default(false),
+    storyId: z.string().nullable().optional(),
     dmMessage: z.string().min(1).max(1000),
     openingDmEnabled: z.boolean().optional().default(false),
     openingDmMessage: z.string().max(1000).optional().nullable(),
@@ -62,8 +64,15 @@ const createAutomationSchema = z
     wholeWordMatch: z.boolean().optional().default(true),
   })
   // A campaign must target a specific post, any post, or the next reel.
+  // A story- or DM-driven campaign has no post at all, so requiring one here
+  // would reject it outright.
   .refine(
-    (d) => d.matchAnyPost || d.pendingNextReel || Boolean(d.postId),
+    (d) =>
+      d.matchAnyPost ||
+      d.pendingNextReel ||
+      Boolean(d.postId) ||
+      d.storyReplyTriggerEnabled ||
+      d.dmTriggerEnabled,
     { message: "Choose which post(s) trigger the campaign", path: ["postId"] }
   )
   // And it must match either specific words or any word.
@@ -90,6 +99,8 @@ const updateAutomationSchema = z.object({
   keywords: z.array(z.string().min(1).max(50)).max(10).optional(),
   matchAnyWord: z.boolean().optional(),
   dmTriggerEnabled: z.boolean().optional(),
+  storyReplyTriggerEnabled: z.boolean().optional(),
+  storyId: z.string().nullable().optional(),
   dmMessage: z.string().min(1).max(1000).optional(),
   openingDmEnabled: z.boolean().optional(),
   openingDmMessage: z.string().max(1000).optional().nullable(),
@@ -395,6 +406,8 @@ export async function POST(request: NextRequest) {
       keywords: matchAnyWord ? [] : parsed.data.keywords,
       matchAnyWord,
       dmTriggerEnabled: parsed.data.dmTriggerEnabled,
+      storyReplyTriggerEnabled: parsed.data.storyReplyTriggerEnabled,
+      storyId: parsed.data.storyId ?? null,
       dmMessage: parsed.data.dmMessage,
       openingDmEnabled,
       openingDmMessage: openingDmEnabled

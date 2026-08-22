@@ -936,11 +936,37 @@ async function processFollowUp(job: Job<ProcessFollowUpJob>): Promise<void> {
  * Dedup is per inbound message id, so each message triggers at most one reply.
  */
 async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
-  const { instagramAccountId, messageId, messageText, senderId } = job.data;
+  const {
+    instagramAccountId,
+    messageId,
+    messageText,
+    senderId,
+    isStoryReply,
+    storyId,
+  } = job.data;
+
+  // A story reply is still a DM, so campaigns listening to every DM keep
+  // firing on it; story-reply campaigns wake only for this kind. Ordinary DMs
+  // keep `dmTriggerEnabled` as a top-level key rather than a one-armed OR.
+  //
+  // `storyId: null` means "any story". A campaign pinned to one story only
+  // wakes when the reply is on that exact story, which is what lets a sequence
+  // of stories carry different campaigns.
+  const triggerWhere = isStoryReply
+    ? {
+        OR: [
+          { dmTriggerEnabled: true },
+          { storyReplyTriggerEnabled: true, storyId: null },
+          ...(storyId
+            ? [{ storyReplyTriggerEnabled: true, storyId }]
+            : []),
+        ],
+      }
+    : { dmTriggerEnabled: true };
 
   const automations = await prisma.automation.findMany({
     where: {
-      dmTriggerEnabled: true,
+      ...triggerWhere,
       isActive: true,
       instagramAccount: { instagramId: instagramAccountId },
     },

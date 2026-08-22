@@ -16,6 +16,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import AccountSelect, { type AccountOption } from "@/components/account-select";
 import PostPicker from "@/components/post-picker";
+import StoryPicker from "@/components/story-picker";
 import CampaignPreview, { type PreviewTab } from "@/components/campaign-preview";
 import { readCache, writeCache } from "@/lib/client-cache";
 import {
@@ -24,7 +25,8 @@ import {
   type ImportRow,
 } from "@/lib/import-queue";
 
-type TriggerScope = "specific" | "any" | "next";
+type TriggerScope = "specific" | "any" | "next" | "story";
+type StoryScope = "any" | "specific";
 type MatchMode = "specific" | "any";
 
 interface LoadedCampaign {
@@ -37,6 +39,8 @@ interface LoadedCampaign {
   keywords: string[];
   matchAnyWord: boolean;
   dmTriggerEnabled: boolean;
+  storyReplyTriggerEnabled: boolean;
+  storyId: string | null;
   dmMessage: string;
   openingDmEnabled: boolean;
   openingDmMessage: string | null;
@@ -149,6 +153,8 @@ export default function CampaignBuilder({ mode, campaignId }: CampaignBuilderPro
   const [postUrl, setPostUrl] = useState<string | null>(null);
   const [postThumb, setPostThumb] = useState<string | null>(null);
   const [postCaption, setPostCaption] = useState("");
+  const [storyScope, setStoryScope] = useState<StoryScope>("any");
+  const [storyId, setStoryId] = useState<string | null>(null);
 
   // Post IDs already tied to another automation on this account, so the picker
   // can flag them and the user knows not to double-assign. Maps postId ->
@@ -158,6 +164,8 @@ export default function CampaignBuilder({ mode, campaignId }: CampaignBuilderPro
   const [matchMode, setMatchMode] = useState<MatchMode>("specific");
   const [keywordText, setKeywordText] = useState("");
   const [dmTriggerEnabled, setDmTriggerEnabled] = useState(false);
+  const [storyReplyTriggerEnabled, setStoryReplyTriggerEnabled] =
+    useState(false);
 
   const [publicReplyEnabled, setPublicReplyEnabled] = useState(false);
   const [publicReplyMessages, setPublicReplyMessages] = useState<string[]>([""]);
@@ -252,13 +260,22 @@ export default function CampaignBuilder({ mode, campaignId }: CampaignBuilderPro
         setName(c.name);
         setSelectedAccountId(c.instagramAccountId);
         setTriggerScope(
-          c.matchAnyPost ? "any" : c.pendingNextReel ? "next" : "specific"
+          c.matchAnyPost
+            ? "any"
+            : c.pendingNextReel
+              ? "next"
+              : c.storyReplyTriggerEnabled && !c.postId
+                ? "story"
+                : "specific"
         );
         setPostId(c.postId);
         setPostUrl(c.postUrl);
+        setStoryId(c.storyId ?? null);
+        setStoryScope(c.storyId ? "specific" : "any");
         setMatchMode(c.matchAnyWord ? "any" : "specific");
         setKeywordText(c.keywords.join(", "));
         setDmTriggerEnabled(c.dmTriggerEnabled ?? false);
+        setStoryReplyTriggerEnabled(c.storyReplyTriggerEnabled ?? false);
         setPublicReplyEnabled(c.publicReplyEnabled);
         setPublicReplyMessages(
           c.publicReplyMessages?.length
@@ -389,6 +406,8 @@ export default function CampaignBuilder({ mode, campaignId }: CampaignBuilderPro
     if (!selectedAccountId) return setError("Connect an Instagram account first.");
     if (triggerScope === "specific" && !postId)
       return setError("Pick a post or reel to trigger the campaign.");
+    if (triggerScope === "story" && storyScope === "specific" && !storyId)
+      return setError("Pick the story that triggers the campaign.");
     if (matchMode === "specific" && keywords.length === 0)
       return setError("Add at least one keyword, or switch to any word.");
     if (!dmMessage.trim()) return setError("Add the DM with the link.");
@@ -407,6 +426,13 @@ export default function CampaignBuilder({ mode, campaignId }: CampaignBuilderPro
       matchAnyWord: matchMode === "any",
       keywords: matchMode === "any" ? [] : keywords,
       dmTriggerEnabled,
+      // A story-scoped campaign is story-driven, so the trigger is implied.
+      // The standalone toggle stays for post campaigns that ALSO answer
+      // story replies.
+      storyReplyTriggerEnabled:
+        triggerScope === "story" ? true : storyReplyTriggerEnabled,
+      storyId:
+        triggerScope === "story" && storyScope === "specific" ? storyId : null,
       dmMessage,
       openingDmEnabled,
       openingDmMessage: openingDmEnabled ? openingDmMessage : null,
@@ -696,6 +722,39 @@ export default function CampaignBuilder({ mode, campaignId }: CampaignBuilderPro
           >
             next post or reel
           </Radio>
+          <Radio
+            checked={triggerScope === "story"}
+            onSelect={() => setTriggerScope("story")}
+          >
+            a story
+          </Radio>
+          {triggerScope === "story" && (
+            <div className="space-y-2 rounded-lg border border-border p-2">
+              <Radio
+                checked={storyScope === "any"}
+                onSelect={() => setStoryScope("any")}
+              >
+                any story
+              </Radio>
+              <Radio
+                checked={storyScope === "specific"}
+                onSelect={() => setStoryScope("specific")}
+              >
+                a specific story
+              </Radio>
+              {storyScope === "specific" && (
+                <StoryPicker
+                  selectedStoryId={storyId}
+                  instagramAccountId={selectedAccountId}
+                  onSelect={setStoryId}
+                />
+              )}
+              <p className="text-xs text-muted">
+                Stories last 24 hours. Pinning a campaign to one means it stops
+                triggering once that story expires.
+              </p>
+            </div>
+          )}
         </Section>
 
         <Section title="And this comment has">
@@ -737,6 +796,25 @@ export default function CampaignBuilder({ mode, campaignId }: CampaignBuilderPro
               {matchMode === "any"
                 ? "Every DM to this account gets the reply below — use with care."
                 : "A DM containing any of these words gets the same reply, no comment needed."}
+            </p>
+          )}
+          <div className="flex items-center justify-between gap-3 rounded-lg border border-border px-3 py-2.5">
+            <span className="text-sm text-foreground">
+              also reply when someone replies to my story{" "}
+              {matchMode === "any" ? "with anything" : "with these words"}
+            </span>
+            <Toggle
+              on={storyReplyTriggerEnabled}
+              onToggle={() =>
+                setStoryReplyTriggerEnabled(!storyReplyTriggerEnabled)
+              }
+            />
+          </div>
+          {storyReplyTriggerEnabled && (
+            <p className="text-xs text-muted">
+              {matchMode === "any"
+                ? "Every reply to your story gets the reply below — use with care."
+                : "A story reply containing any of these words gets the same reply. Story replies only — ordinary DMs are ignored unless the toggle above is on too."}
             </p>
           )}
           <div className="flex items-center justify-between rounded-lg border border-border px-3 py-2.5">
@@ -994,6 +1072,7 @@ export default function CampaignBuilder({ mode, campaignId }: CampaignBuilderPro
             caption={postCaption}
             sampleComment={keywords[0] ?? ""}
             dmTriggerEnabled={dmTriggerEnabled}
+            storyReplyTriggerEnabled={storyReplyTriggerEnabled}
             publicReplyEnabled={publicReplyEnabled}
             publicReplyMessage={publicReplyMessages.find((m) => m.trim()) ?? ""}
             openingDmEnabled={openingDmEnabled}

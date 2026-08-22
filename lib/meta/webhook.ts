@@ -72,6 +72,10 @@ interface WebhookEntry {
       is_deleted?: boolean;
       is_unsupported?: boolean;
       attachments?: Array<{ type?: string }>;
+      // Present when the user replied to one of our stories. Instagram has no
+      // comments on stories — a story reply is delivered here, as an ordinary
+      // message that happens to carry the story it answers.
+      reply_to?: { story?: { id?: string; url?: string }; mid?: string };
     };
   }>;
 }
@@ -81,6 +85,14 @@ export interface WebhookMessageEvent {
   messageId: string;
   messageText: string;
   senderId: string;
+  /**
+   * Set only when this message is a reply to one of our stories, so a campaign
+   * can target story replies without also firing on every ordinary DM. Omitted
+   * rather than set false: callers treat it as a plain DM when absent.
+   */
+  isStoryReply?: boolean;
+  /** Which story was replied to, so a campaign can target one specific story. */
+  storyId?: string;
 }
 
 export interface WebhookPostbackEvent {
@@ -209,11 +221,18 @@ export function parseMessageEvents(
       // Ignore anything the connected account sent to itself.
       if (senderId === accountId) continue;
 
+      const repliedStory = message.reply_to?.story;
+      const isStoryReply = Boolean(repliedStory);
+
       events.push({
         instagramAccountId: accountId,
         messageId,
         messageText: text,
         senderId,
+        // Spread rather than always-present so a plain DM keeps its exact
+        // previous shape.
+        ...(isStoryReply ? { isStoryReply: true } : {}),
+        ...(repliedStory?.id ? { storyId: repliedStory.id } : {}),
       });
     }
   }

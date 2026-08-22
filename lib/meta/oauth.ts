@@ -7,7 +7,11 @@ import {
 } from "crypto";
 import { getEncryptionKeyHex, requireEnv } from "@/lib/env";
 
-const INSTAGRAM_OAUTH_URL = "https://api.instagram.com/oauth/authorize";
+// Instagram Login authorization lives on www, not api. api.instagram.com was the
+// Basic Display API host (deprecated Dec 2024) and now 404s, which surfaces as
+// "Sorry, this page isn't available" instead of a consent screen. The token
+// exchange below is unaffected and still lives on api.instagram.com.
+const INSTAGRAM_OAUTH_URL = "https://www.instagram.com/oauth/authorize";
 const INSTAGRAM_TOKEN_URL = "https://api.instagram.com/oauth/access_token";
 const ALGORITHM = "aes-256-gcm";
 const IV_LENGTH = 16;

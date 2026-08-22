@@ -563,6 +563,31 @@ export async function getUserInfo(accessToken: string): Promise<InstagramUser> {
 const MEDIA_FIELDS =
   "id,caption,media_type,media_product_type,media_url,thumbnail_url,timestamp,permalink,like_count,comments_count";
 
+/**
+ * The account's currently-active stories. Instagram only keeps stories for 24
+ * hours, so this list is short-lived by nature and never paginated — there is
+ * no "all stories" to fetch. Story ids returned here are the same ids the
+ * messaging webhook reports in `reply_to.story.id`, which is what lets a
+ * campaign be pinned to one story in a sequence.
+ *
+ * Meta forbids storing or caching story media, so callers must treat
+ * `media_url` as display-only and never persist it.
+ */
+export async function getUserStories(
+  accessToken: string
+): Promise<InstagramMedia[]> {
+  const url = new URL(`${instagramGraphBase()}/me/stories`);
+  url.searchParams.set(
+    "fields",
+    "id,media_type,media_url,thumbnail_url,timestamp,permalink"
+  );
+  url.searchParams.set("access_token", accessToken);
+
+  const response = await fetch(url.toString());
+  const data = await handleResponse<{ data?: InstagramMedia[] }>(response);
+  return data.data ?? [];
+}
+
 // Instagram caps a single media page at 100 items.
 const MEDIA_PAGE_SIZE = 100;
 

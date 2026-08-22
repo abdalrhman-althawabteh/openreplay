@@ -182,6 +182,15 @@ model Automation {
   // keywords above. Independent of the post trigger — a DM has no media, so
   // postId / matchAnyPost do not apply to it.
   dmTriggerEnabled Boolean @default(false)
+  // Fire this campaign when someone replies to one of the account's stories.
+  // Stories have no comments, so Instagram delivers a story reply as an
+  // ordinary message carrying `reply_to.story`. Separate from dmTriggerEnabled
+  // so a campaign can target story replies WITHOUT also answering every DM.
+  storyReplyTriggerEnabled Boolean @default(false)
+  // Which story the reply must be on. Null means any story. Instagram
+  // stories expire after 24h, so a campaign pinned to one simply stops
+  // matching once it is gone — deliberately not auto-widened to "any".
+  storyId        String?
   dmMessage      String
   openingDmEnabled     Boolean @default(false)
   openingDmMessage     String?

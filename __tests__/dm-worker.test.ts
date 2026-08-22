@@ -958,6 +958,58 @@ describe("DM Worker — DM keyword trigger", () => {
     expect(mockSendDirectMessageWithLinkButton).not.toHaveBeenCalled();
   });
 
+  it("should also wake story-reply campaigns when the DM is a story reply", async () => {
+    const processor = getProcessor();
+    await processor(createMockMessageJob({ isStoryReply: true }));
+
+    expect(mockPrisma.automation.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          OR: [
+            { dmTriggerEnabled: true },
+            { storyReplyTriggerEnabled: true, storyId: null },
+          ],
+          isActive: true,
+        }),
+      })
+    );
+  });
+
+  it("should match a campaign pinned to the story that was replied to", async () => {
+    const processor = getProcessor();
+    await processor(
+      createMockMessageJob({ isStoryReply: true, storyId: "story_42" })
+    );
+
+    const where = mockPrisma.automation.findMany.mock.calls[0][0].where;
+    expect(where.OR).toEqual([
+      { dmTriggerEnabled: true },
+      { storyReplyTriggerEnabled: true, storyId: null },
+      { storyReplyTriggerEnabled: true, storyId: "story_42" },
+    ]);
+  });
+
+  it("should not offer a pinned-story arm when the story id is unknown", async () => {
+    const processor = getProcessor();
+    await processor(createMockMessageJob({ isStoryReply: true }));
+
+    const where = mockPrisma.automation.findMany.mock.calls[0][0].where;
+    // Without an id, only "any story" campaigns can legitimately match — a
+    // pinned campaign must not fire on an unidentified story.
+    expect(where.OR).toHaveLength(2);
+  });
+
+  it("should not wake story-reply campaigns for an ordinary DM", async () => {
+    const processor = getProcessor();
+    await processor(createMockMessageJob());
+
+    const where = mockPrisma.automation.findMany.mock.calls[0][0].where;
+    // The whole point of the separate flag: a story-only campaign must stay
+    // silent for a plain DM.
+    expect(where).not.toHaveProperty("OR");
+    expect(where.dmTriggerEnabled).toBe(true);
+  });
+
   it("should log the reply against the inbound message id for dedup", async () => {
     const processor = getProcessor();
     await processor(createMockMessageJob());

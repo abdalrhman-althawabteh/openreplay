@@ -23,6 +23,7 @@ interface CampaignPreviewProps {
   // The DM keyword trigger gets its own thread: the user messages first, and
   // the opening DM is skipped because the conversation is already open.
   dmTriggerEnabled: boolean;
+  storyReplyTriggerEnabled?: boolean;
   publicReplyEnabled: boolean;
   publicReplyMessage: string;
   openingDmEnabled: boolean;
@@ -479,15 +480,26 @@ export default function CampaignPreview(props: CampaignPreviewProps) {
     { key: "post", label: "Post" },
     { key: "comments", label: "Comments" },
     { key: "dm", label: "DM" },
-    ...(props.dmTriggerEnabled
-      ? [{ key: "dmTrigger" as const, label: "DM trigger" }]
+    ...(props.dmTriggerEnabled || props.storyReplyTriggerEnabled
+      ? [
+          {
+            key: "dmTrigger" as const,
+            // A story reply opens the same thread as a DM, so it reuses this
+            // screen rather than earning a near-identical fifth tab.
+            label: props.dmTriggerEnabled ? "DM trigger" : "Story reply",
+          },
+        ]
       : []),
   ];
 
   // The DM-trigger tab disappears when the trigger is switched off; fall back
   // to the comment thread rather than rendering an empty phone.
   const activeTab: PreviewTab =
-    tab === "dmTrigger" && !props.dmTriggerEnabled ? "dm" : tab;
+    tab === "dmTrigger" &&
+    !props.dmTriggerEnabled &&
+    !props.storyReplyTriggerEnabled
+      ? "dm"
+      : tab;
 
   return (
     <div className="flex flex-col items-center gap-5">

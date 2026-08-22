@@ -361,6 +361,77 @@ describe("parseMessageEvents", () => {
     expect(parseMessageEvents(payload)).toHaveLength(0);
   });
 
+  it("should flag a story reply", () => {
+    const payload = messagingPayload([
+      {
+        sender: { id: "user_999" },
+        recipient: { id: "ig_456" },
+        message: {
+          mid: "mid_story",
+          text: "LINK",
+          reply_to: { story: { id: "story_1", url: "https://cdn/story.jpg" } },
+        },
+      },
+    ]);
+
+    expect(parseMessageEvents(payload)).toEqual([
+      {
+        instagramAccountId: "ig_456",
+        messageId: "mid_story",
+        messageText: "LINK",
+        senderId: "user_999",
+        isStoryReply: true,
+        storyId: "story_1",
+      },
+    ]);
+  });
+
+  it("should flag a story reply even when the story carries no id", () => {
+    const payload = messagingPayload([
+      {
+        sender: { id: "user_999" },
+        recipient: { id: "ig_456" },
+        message: {
+          mid: "mid_story2",
+          text: "LINK",
+          reply_to: { story: { url: "https://cdn/story.jpg" } },
+        },
+      },
+    ]);
+
+    const [event] = parseMessageEvents(payload);
+    expect(event.isStoryReply).toBe(true);
+    // No id means it can only ever match an "any story" campaign.
+    expect(event).not.toHaveProperty("storyId");
+  });
+
+  it("should not flag a plain DM as a story reply", () => {
+    const payload = messagingPayload([
+      {
+        sender: { id: "user_999" },
+        recipient: { id: "ig_456" },
+        message: { mid: "mid_plain", text: "LINK" },
+      },
+    ]);
+
+    const [event] = parseMessageEvents(payload);
+    expect(event).not.toHaveProperty("isStoryReply");
+    expect(event).not.toHaveProperty("storyId");
+  });
+
+  it("should not flag a reply to another message as a story reply", () => {
+    const payload = messagingPayload([
+      {
+        sender: { id: "user_999" },
+        recipient: { id: "ig_456" },
+        message: { mid: "mid_r", text: "LINK", reply_to: { mid: "mid_prev" } },
+      },
+    ]);
+
+    const [event] = parseMessageEvents(payload);
+    expect(event).not.toHaveProperty("isStoryReply");
+  });
+
   it("should ignore messages the account sent to itself", () => {
     const payload = messagingPayload([
       {

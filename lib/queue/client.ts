@@ -61,6 +61,12 @@ export interface ProcessMessageJob {
   messageId: string;
   messageText: string;
   senderId: string;
+  // True when the message is a reply to one of our stories, which additionally
+  // wakes campaigns with `storyReplyTriggerEnabled`. Optional so jobs already
+  // queued before this shipped stay valid.
+  isStoryReply?: boolean;
+  // The story that was replied to, matched against Automation.storyId.
+  storyId?: string;
 }
 
 export type DmQueueJob =
