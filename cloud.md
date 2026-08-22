@@ -312,6 +312,31 @@ the old URL keeps sending dead links after everything else looks correct.
   when an invite is actually pending.
 - Webhooks are only delivered when the app is **Live**.
 
+**Meta webhooks — the one that cost us a whole test round**
+- **Editing the webhook Callback URL wipes the app's field subscriptions.** After repointing
+  the URL at the new domain, `GET /{app-id}/subscriptions` returned `{"data": []}` — a verified
+  callback with **zero fields**, so Meta sent nothing and `WebhookEvent` stayed at 0 forever.
+  The console shows a reassuring green check either way. Always re-check:
+
+      curl -s "https://graph.facebook.com/v25.0/<APP_ID>/subscriptions?access_token=<APP_ID>|<APP_SECRET>"
+
+  and re-subscribe if empty:
+
+      curl -X POST "https://graph.facebook.com/v25.0/<APP_ID>/subscriptions" \
+        -d object=instagram -d callback_url=<URL>/api/webhook \
+        -d fields=comments,messages -d verify_token=<TOKEN> \
+        -d access_token="<APP_ID>|<APP_SECRET>"
+
+  Note there are **two** independent subscriptions and both must be right: this **app-level**
+  one, and the **per-account** one (`/{ig-id}/subscribed_apps`) that the app sets at connect time.
+
+**The poller skips comments the owner already replied to — by design**
+- `lib/polling/comment-reconciler.ts` drops any comment that already has a reply from the
+  connected account (`ownerReplied`), so a handled comment is never re-touched. Consequence
+  while testing: **manually replying to your own test comment permanently disqualifies it.**
+  Retest with a *fresh* comment. It is also invisible in the logs — `recordSweep` only writes
+  a row when something was enqueued or errored, so "matched but skipped" leaves no trace.
+
 **Railway**
 - Start/Build command fields **silently discard input if you press Tab.** Press **Enter**. Our
   first deploy came up "Online" while running `next start` instead of the worker — looked
