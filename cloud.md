@@ -1,623 +1,362 @@
-# cloud.md — OpenReply: what it does, what it can't, and what we change before we start
+# cloud.md — OpenReply project reference
 
-Audit date: 2026-08-22. Repo: `diwenne/openreply` @ `main`. All claims below were checked
-against the code in this clone, not against the README.
+**Last updated: 2026-08-22.** Single source of truth for this project: what it is, what we
+changed, what is deployed, what is left, and every trap we hit. Written to be read cold —
+assume no memory of the conversation that produced it.
 
----
-
-## 1. Short answer on Instagram Stories
-
-**Story automation is possible, but this repo does not do it today.** Neither the word
-"story" nor "mention" appears anywhere in the source (only "history", from the follower
-chart). No dedicated code path exists.
-
-The good news: Meta delivers **both** story interactions through the `messages` webhook,
-which this repo already subscribes to and already parses. So this is a small patch, not a
-new subsystem.
-
-| Story trigger | How Meta delivers it | Status in this repo |
-|---|---|---|
-| **Story reply** — someone replies to *your* story in DM | `messages` webhook, normal message with `text` **plus** `message.reply_to.story.{id,url}` | **Already fires today, accidentally.** The parser keeps it because it has text, and any campaign with `dmTriggerEnabled` will keyword-match it. It just can't tell a story reply from a normal DM. |
-| **Story mention** — someone tags `@you` in *their* story | `messages` webhook, **no text**, `message.attachments[0].type == "story_mention"` | **Silently dropped.** `lib/meta/webhook.ts:208` requires non-empty text, so the event never reaches the queue. |
-| **Story insights** (views, exits, etc.) | `story_insights` webhook field | **Not available at all** on Instagram Login apps — Facebook Login only. Out of scope. |
-
-So: story replies work by accident and need to be made deliberate; story mentions need
-about 40 lines across 4 files.
-
-### What is flat-out impossible on Instagram (do not promise these)
-
-These are Meta platform limits, not repo gaps. No open-source project can do them via the
-official API, and doing them by scraping or browser automation is what gets accounts banned.
-
-- **DM everyone who viewed your story.** There is no story-viewer API. ManyChat can't do
-  this either.
-- **React to poll / quiz / slider sticker taps.** No webhook for sticker interactions.
-- **Auto-reply to story likes.** No webhook.
-- **Comment on stories.** Stories have no comments, so the whole comment-to-DM engine
-  does not apply to them.
-- **DM a cold user.** You can only message someone inside a 24-hour window opened by
-  *their* action (comment, DM, story reply, story mention).
+> ⚠️ **This file is committed to a PUBLIC GitHub repo. Never put secrets in it.** Secret values
+> live in `.env` (gitignored) and in Railway/Vercel environment variables. This file names
+> variables, never their values.
 
 ---
 
-## 2. What this repo can automate right now
+# 1. What this project is
 
-Verified in `lib/queue/dm-worker.ts`, `prisma/schema.prisma:168-215`, `lib/meta/client.ts`.
+**OpenReply** — an open-source ManyChat alternative for Instagram. Someone comments a keyword on
+your post/reel (or replies to your story) and gets a DM with your link.
 
-**Triggers (2):**
-1. **Comment on a post/reel** → keyword match. Per-post or `matchAnyPost`. Whole-word or
-   partial. `matchAnyWord` catches everything.
-2. **Inbound DM** → keyword match (`dmTriggerEnabled`). Story replies land here too.
+- **Working from:** `/Users/admin/Downloads/claude code projects/openreplay`
+- **Our repo:** `https://github.com/abdalrhman-althawabteh/openreplay` (public, branch `main`)
+- **Upstream:** `https://github.com/diwenne/openreply` — git remote `upstream`, for pulling
+  fixes or sending PRs back
+- **Owner's use:** personal only. **Not** a SaaS for clients — this decision matters, see §5.1.
 
-**Actions, per campaign:**
-- Private reply DM (Meta's official comment→DM).
-- Public comment reply, with a rotating pool (`publicReplyMessages[]`) so replies aren't identical.
-- Opening DM with a tappable button, then a "reveal" DM on tap. Existing to dodge Meta's
-  private-reply link restrictions.
-- 5-minute fallback: if they read the opening DM and never tap, send the reveal anyway
-  (`app/api/webhook/route.ts`, `OPENING_DM_READ_FALLBACK_DELAY_MS`).
-- **Follow gate** — checks Meta's `is_user_follow_business`, re-prompts until they follow.
-  Fails open when Instagram doesn't return the flag.
-- Up to **2 tracked link buttons** per DM, each with its own click/CTR stats (`/r/[slug]`).
-- **Delayed follow-up DM** N minutes after delivery.
-- `{username}` personalisation.
+## Stack
 
-**Infrastructure that's already solid:**
-- Per-account rate limiter at Meta's 750 private replies/hour, with overflow queued not dropped.
-- BullMQ + Redis worker, retries, idempotent job IDs.
-- Polling reconciler (`lib/polling/comment-reconciler.ts`) as a safety net for dropped webhooks.
-- Encrypted tokens at rest (AES-256-GCM), auto token refresh cron.
-- Multi-workspace + roles (owner/admin/member) — usable as an agency.
-- Inbox: read and reply to real DM threads from the dashboard.
-- Follower snapshots, since Instagram only retains ~30 days of insights.
-- 14 test files under `__tests__/`, CI on GitHub Actions.
+Next.js 16 (App Router, Turbopack, React 19) · Prisma 7 + PostgreSQL · BullMQ on Redis ·
+Auth.js v5 email magic links · Tailwind 4 · Vitest · TypeScript.
 
-**Honest assessment:** this is well-built for one feature (comment→DM) and thin on
-everything else. Compared to ManyChat it is missing: multi-step conversation flows,
-audience segmentation/tags, broadcasts, and any non-Instagram channel.
+**Two processes, always:**
+1. **Web app** (`npm run dev` / Vercel) — dashboard, API routes, receives Meta webhooks.
+2. **Worker** (`npm run worker` / Railway) — drains the BullMQ queue and actually sends DMs.
+   Also runs a **comment poller every 5 min** as a safety net for webhooks Meta never delivers.
+
+If DMs never arrive, **check the worker first.** `/api/health` reports `worker.healthy`.
 
 ---
 
-## 3. Other platforms worth adding, ranked by effort
+# 2. Identities and IDs (no secrets)
 
-The architecture (webhook route → BullMQ queue → worker → provider client) is
-channel-agnostic. The Instagram assumption is baked into `InstagramAccount` and
-`lib/meta/client.ts`, not into the queue.
-
-| Platform | Feasible? | Effort | Notes |
-|---|---|---|---|
-| **Facebook Pages / Messenger** | Yes | **Low** | Same Meta app, same Graph API, same `messaging` webhook shape. Comment→DM on FB posts is the identical feature. Needs Facebook Login instead of Instagram Login, and the `feed` webhook field. **Best first expansion.** |
-| **WhatsApp Business Cloud API** | Yes | Medium | Same Meta developer app. Real broadcast capability (template messages) — the one thing Instagram genuinely can't do. Needs a phone number and template approval. High commercial value. |
-| **Telegram** | Yes | **Very low** | Bot API is free, no approval, no rate-limit theatre. Weekend job. Different audience though. |
-| **Threads** | Partial | Medium | Meta's Threads API supports reading/posting replies. **No DM API**, so "reply publicly to a keyword" only. |
-| **YouTube** | Partial | Medium | Comments API works for auto-reply. **No DM API** — YouTube killed private messaging. Comment-reply-only. |
-| **Discord** | Yes | Low | Trivial API, but it's a different product category. |
-| **X / Twitter** | Technically | High | DM API exists but sits behind expensive paid tiers. Poor ROI. |
-| **TikTok** | **No** | — | No official comment or DM automation API. Anyone selling this is scraping. Don't. |
-| **LinkedIn** | **No** | — | Messaging API is partner-only, effectively closed. |
-
-**Recommendation:** Facebook Pages first (largest reuse, ~2 days), then WhatsApp (the real
-differentiator). Skip TikTok entirely, however much clients ask for it.
-
----
-
-## 4. Changes to make before we start — the actual work list
-
-### Phase 0 — Get it running as-is (do this before writing any code)
-
-Nothing here is optional; the Meta side is where the time goes, not the code.
-
-1. `git clone`, `npm install`, `cp .env.example .env`.
-2. `docker-compose up -d` (Postgres + Redis), then `npm run db:migrate`.
-3. Two processes, always: `npm run dev` **and** `npm run worker`. If DMs never arrive,
-   the worker is the first thing to check.
-4. Fill `.env`: generate `NEXTAUTH_SECRET`, `CRON_SECRET`, and a 64-hex-char
-   `ENCRYPTION_KEY` (`openssl rand -hex 32`). Get a Resend key for magic-link login.
-5. Meta app: Instagram account must be **Business or Creator**, not personal. Follow
-   `docs/setup.md` steps 4–9 exactly — especially adding your own IG account as a
-   *tester* and accepting the invite, which is where most people stall.
-6. Webhook needs a public HTTPS URL. Locally use a tunnel; in production, Vercel.
-7. **Verify before building anything:** comment a keyword on your own reel from a second
-   account, confirm the DM arrives. Then reply to your own story from that account and
-   confirm a `dmTriggerEnabled` campaign fires. That single test proves the story path
-   already half-works.
-
-### Phase 1 — Story mention support (the real gap)
-
-Four files. Estimate: half a day including a test.
-
-1. **`lib/meta/webhook.ts:203-208`** — the drop point. Add `reply_to` to the message type,
-   and stop discarding attachment-only messages when the attachment is a story mention:
-   ```ts
-   const isStoryMention = message.attachments?.[0]?.type === "story_mention";
-   const isStoryReply = Boolean(message.reply_to?.story);
-   if ((!text && !isStoryMention) || !messageId || !senderId || !accountId) continue;
-   ```
-   Carry `isStoryMention` / `isStoryReply` on `WebhookMessageEvent`.
-
-2. **`prisma/schema.prisma:184`** — one new column beside `dmTriggerEnabled`:
-   `storyMentionTriggerEnabled Boolean @default(false)`. A story mention has no text, so
-   it cannot be keyword-gated; it needs its own opt-in flag or every DM campaign would
-   fire on every mention. Then `npx prisma migrate dev`.
-
-3. **`lib/queue/dm-worker.ts:938`** (`processMessage`) — branch on the flag: when
-   `isStoryMention`, select campaigns by `storyMentionTriggerEnabled` and skip keyword
-   matching entirely. Text-bearing messages keep the existing path unchanged.
-
-4. **`components/campaign-builder.tsx`** — one checkbox: "Reply when someone mentions me
-   in their story."
-
-5. **Test** — extend `__tests__/webhook.test.ts` with the two real payload shapes:
-   `{message:{mid,attachments:[{type:"story_mention"}]}}` and
-   `{message:{mid,text:"LINK",reply_to:{story:{id,url}}}}`.
-
-**Constraint to respect:** Meta forbids storing or caching the story media. Keep the CDN
-URL only, never download the image.
-
-### Phase 2 — Make story replies deliberate
-
-Right now a story reply is indistinguishable from a normal DM. Once `isStoryReply` is
-parsed (Phase 1, step 1), add an optional per-campaign filter so a campaign can target
-story replies *only*. Small, but it's the difference between "it happens to work" and "it's
-a feature we can sell".
-
-### Phase 3 — Things I'd fix regardless
-
-- `subscribed_fields` at **`lib/meta/client.ts:760`** is `["comments", "messages"]`. Add
-  `"messaging_postbacks"` and `"messaging_seen"` explicitly — the postback and read
-  handlers in `app/api/webhook/route.ts` depend on those events, and relying on them
-  arriving under the default subscription is fragile.
-- `README.md` claims a follow gate that "fails open". Confirm that behaviour with a test
-  before relying on it commercially — a silent fail-closed loses real leads.
-- The 5-minute read-fallback delay is a hardcoded constant. Make it per-campaign only if a
-  client actually asks; not before.
-
-### Phase 4 — Facebook Pages (only after Phase 1–2 ship)
-
-Same Meta app, `feed` webhook field, Facebook Login. The queue, worker, rate limiter,
-tracked links, and logging all carry over untouched. The work is a second provider client
-and a `platform` discriminator on the account model.
-
----
-
-## 5. Decisions still open
-
-- Hosting: Vercel + Railway (README's path) vs. the Dokploy self-host guide in
-  `docs/deploy-dokploy.md`. Vercel is faster to prove the concept; the worker must live
-  somewhere long-running either way.
-- Single account or agency multi-workspace from day one? The code supports both; the Meta
-  app review burden differs a lot.
-- Does the roadmap include WhatsApp? If yes, register the phone number early — template
-  approval has real lead time.
-
----
-
-### Note
-
-You asked for `cloud.md`. There is already a `CLAUDE.md` in this repo (it just contains
-`@AGENTS.md`, a Next.js 16 instruction). If you meant this file to be the AI assistant's
-instruction file, say so and I'll merge it into `CLAUDE.md` instead.
-
----
-
-# Part 2 — Local setup log (2026-08-22)
-
-Everything below was actually executed and verified on this machine, not proposed.
-
-## Changes made to the repo
-
-| File | Change | Why |
-|---|---|---|
-| `.env` | **Created** (gitignored) | Fresh `NEXTAUTH_SECRET`, `CRON_SECRET`, `ENCRYPTION_KEY` (64 hex), `WEBHOOK_VERIFY_TOKEN`. Meta vars still blank. |
-| `package.json:13` | `"worker": "tsx worker/dm-worker.ts"` → `"tsx --env-file-if-exists=.env worker/dm-worker.ts"` | **Real bug fix.** `next dev` auto-loads `.env`; `tsx` does not, and nothing under `worker/` or `lib/` imports `dotenv`. The worker would start with no `DATABASE_URL` and throw at the first heartbeat — while `lib/queue/client.ts:14` uses `process.env.REDIS_URL!` (non-null assertion), so ioredis *silently* connects to the default `127.0.0.1:6379` and looks fine. `--env-file-if-exists` is a no-op in production where the platform injects env vars. Worth upstreaming. |
-| `docker-compose.override.yml` | **Created** (gitignored) | Ports 5432/6379 are already taken on this machine by an unrelated `postiz` stack. Remaps Postgres to **5434** and Redis to **6380**. Needs the `!override` tag — compose *appends* list fields by default, so a plain override tried to bind both ports and failed. |
-| `.gitignore` | +1 line for `docker-compose.override.yml` | Machine-specific ports must not be committed. |
-| `next.config.ts` | Added `allowedDevOrigins`, derived from `NEXTAUTH_URL` | **Dev-only, but it made the app look completely broken.** Serving `next dev` through the ngrok tunnel meant Next blocked every cross-origin `/_next/*` request (`Blocked cross-origin request to Next.js dev resource`). Page HTML returned 200, but the client chunks never loaded, so React never hydrated and every page sat on its loading skeleton forever — Dashboard, Overview, Inbox, Campaigns, DM Logs, Settings. The tell in the log was that **no `/api/*` request ever arrived**, only page routes. Derived from `NEXTAUTH_URL` rather than hardcoded so it follows the tunnel domain; ignored in production. |
-| `lib/meta/oauth.ts:10` | `INSTAGRAM_OAUTH_URL` `api.instagram.com` → `www.instagram.com` | **Real bug fix — blocked the whole product.** Clicking *Connect Instagram* landed on *"Sorry, this page isn't available"*. `api.instagram.com/oauth/authorize` was the **Basic Display API** host, deprecated Dec 2024, and now returns **HTTP 404**; `www.instagram.com/oauth/authorize` returns 200. Verified both with curl side by side. The **token** endpoint at `api.instagram.com/oauth/access_token` is unaffected and still correct (probed: returns `400 Invalid authorization code`, not 404) — so only the authorize constant moves. Definitely worth upstreaming. |
-
-Not changed: `README.md:63-72` omits `npm run db:generate`, so its quickstart crashes on a
-fresh clone (`app/generated/prisma` is gitignored and neither `next dev` nor
-`prisma migrate deploy` creates it). `docs/setup.md:245-249` has the correct order. Left
-alone — worth an upstream PR, not needed for us.
-
-## Local ports on this machine
-
-| Service | Port | Note |
-|---|---|---|
-| Web app | 3000 | `npm run dev` |
-| Postgres | **5434** | remapped from 5432 |
-| Redis | **6380** | remapped from 6379 |
-| Mailpit SMTP | 1025 | login emails |
-| Mailpit web UI | **8025** | read the magic link here |
-| ngrok inspector | 4040 | |
-
-## Run it again from cold
-
-```bash
-open -a Docker                                    # wait for the daemon
-docker compose up -d                              # postgres + redis
-docker start mailpit                              # login-email catcher
-npm run dev                                       # terminal 1
-npm run worker                                    # terminal 2
-ngrok http 3000 --url=filtratable-reforgeable-alba.ngrok-free.dev   # terminal 3
-```
-
-First-time-only, already done: `npm install`, `npm run db:generate`, `npm run db:migrate`.
-
-## Login has no dev bypass
-
-`lib/auth.ts:24-31` has exactly one provider — no Credentials fallback, no `NODE_ENV`
-branch, no console-logged magic link. A deliverable email is mandatory. Instead of signing
-up for Resend just to log in locally, `EMAIL_SERVER=smtp://localhost:1025` points at a
-Mailpit container and the link is read at http://localhost:8025. Resend is still required
-for production.
-
-## Verified working
-
-- `/api/health` → `200 {"status":"ok"}`, all four checks green (database, redis, queue, worker heartbeat).
-- 19 Prisma migrations applied to an empty DB.
-- Magic-link login → session created → `/dashboard` 200 → workspace auto-provisioned.
-- `npm run typecheck` clean · `npm run lint` clean · `npm test` **142 passed / 14 files**.
-- ngrok tunnel reaches the app over HTTPS end to end.
-
-## Still open
-
-- Static ngrok domain: **`filtratable-reforgeable-alba.ngrok-free.dev`** (reserved to the account —
-  verified by rebinding it explicitly with `--url` after a full tunnel restart). `NEXTAUTH_URL`
-  is set to it and `/api/health` is green over public HTTPS.
-- Meta app not created — `INSTAGRAM_APP_ID`, `INSTAGRAM_APP_SECRET`, `FACEBOOK_APP_SECRET` still blank in `.env`.
-- **`abdalrhmanraed` has not accepted its tester invite** (`abd_thawabteh` has). Needed before
-  the DM test: with the app unpublished it holds only **Standard Access**, so it can only
-  message accounts that hold a role on the app. Accept at
-  `https://www.instagram.com/accounts/manage_access/` → **Tester Invites** → `Business-IG`.
-  That tab exists on **web only** — the mobile Instagram app does not surface it, which costs
-  people hours.
-
-## Instagram connection — verified live
-
-`abd_thawabteh` (`17841405671850428`) connected, token encrypted, `webhookSubscribed = true`.
-All data APIs return real data: `/api/dashboard/stats`, `/api/instagram/accounts`,
-`/api/automations`, `/api/logs`, and `/api/instagram/posts` (**143 real posts**). The campaign
-builder renders the post picker and the live DM preview.
-
----
-
-## Why campaigns showed "0 runs" — and a correction to Part 1
-
-**Not a code bug.** Everything on our side was working:
-
-- Worker alive, heartbeat healthy, poller sweeping every 5 min since boot.
-- `recordSweep` writes an `OperationalEvent` only when something was enqueued **or** an error
-  occurred (`lib/polling/comment-reconciler.ts:254`). Zero rows meant sweeps ran **cleanly**
-  and simply found nothing — not that they crashed.
-- Both campaigns correct and `isActive`. Both Instagram testers accepted.
-
-**The real cause, proved with the live token:**
-
-| Query | Result |
+| Thing | Value |
 |---|---|
-| `/{ig-user-id}/media` → `comments_count` on post `18170086765453229` | **9** |
-| `/{media-id}/comments` (same token, same post) | **0** |
+| Domain (owned) | `leads-alchemy.online` — DNS at **Namecheap** (`dns1/dns2.registrar-servers.com`) |
+| App URL (target) | **`openreply.leads-alchemy.online`** |
+| Temporary dev URL | `filtratable-reforgeable-alba.ngrok-free.dev` — **being retired**, see §6 |
+| Meta app name | `Business` |
+| **Facebook** App ID | `2901649213548346` |
+| **Instagram** App ID | `2484605788695559` ← different number, easy to confuse |
+| Connected IG account | `abd_thawabteh`, IGID `17841405671850428` (Business, app admin) |
+| Second IG account | `abdalrhmanraed` — Instagram Tester, the commenter for tests |
+| Railway project | `trustworthy-creativity` · `83f542b3-c97d-4bfd-8dda-02df6b352bd3` (Hobby, $5/mo) |
+| Postgres public host | `reseau.proxy.rlwy.net:21321` |
+| Login email | `abdalrhman.althawabteh@gmail.com` |
 
-Instagram reports 9 comments and returns none of them. Not a field-permission filter —
-probed with no fields, minimal fields, and the repo's exact field set: all returned 0, with
-no API error.
-
-The app is in **Development mode (Unpublished)**. In that state the Graph API does not serve
-comment data.
-
-### The correction
-
-Part 1 planned around the polling reconciler letting us skip publishing the Meta app. That
-was **wrong**. The poller bypasses **webhooks**, but not the **access level** — it calls the
-very same Graph API, which is gated by the app's publish state. Publishing is not optional.
-
-### What publishing does and does not buy
-
-Publishing moves the app to **Live** with **Standard Access**, which covers only accounts
-holding a role on the app. Concretely:
-
-- ✅ Comments from **`abdalrhmanraed`** (Instagram Tester) → will work.
-- ❌ The 9 comments from ordinary followers → still invisible. Those need **Advanced Access**
-  to `instagram_business_manage_comments`, which requires **App Review** plus **business
-  verification** (`META_APP_REVIEW.md:44`).
-- ⚠️ Comments from **`abd_thawabteh`** never fire regardless — it is the connected account and
-  the code skips its own comments by design (`lib/meta/webhook.ts:117-121`), because Meta
-  rejects a private reply to yourself.
-
-So the test must be: comment from **`abdalrhmanraed`** on a post owned by **`abd_thawabteh`**.
-
-**This is the gate on running OpenReply for real customers**, not a local setup detail: until
-App Review grants Advanced Access, the tool only ever responds to accounts you have added as
-testers.
-
-Publish prerequisites — all three verified live (HTTP 200):
-`/privacy` · `/terms` · `/data-deletion`
+Secret **names** in use: `NEXTAUTH_SECRET`, `CRON_SECRET`, `ENCRYPTION_KEY` (must be exactly 64
+hex chars), `INSTAGRAM_APP_SECRET`, `FACEBOOK_APP_SECRET`, `WEBHOOK_VERIFY_TOKEN`,
+`RESEND_API_KEY` / `EMAIL_SERVER`.
 
 ---
 
-# Part 3 — WORKING (2026-08-22)
+# 3. What we built
 
-## Publishing was the fix
+## 3.1 Story-reply automation (new feature, ours)
 
-App published (`Business`, ID `2901649213548346`). Before/after on the exact same token and post:
+Instagram has **no comments on stories**. Meta delivers two different things on the `messages`
+webhook we already subscribe to:
 
-| | Before publish | After publish |
+| What | Payload shape | Status |
 |---|---|---|
-| `/{media}/comments` on post `18170086765453229` | **0** | **8** |
+| **Story reply** | normal message + `reply_to.story = {id, url}` | built |
+| Story mention (they tag you) | message with **no text**, `attachments[0].type == "story_mention"` | not built — no text means no keyword gate, needs its own opt-in column |
 
-Set during publish: `/privacy`, `/terms`, `/data-deletion` URLs and Category = *Business and pages*.
-Meta then reported "All required app settings are complete."
+Real payload, captured from a live reply:
 
-## First successful comment→DM run
+    "reply_to": { "story": { "id": "17899092177578791", "url": "https://lookaside.fbsbx.com/..." } }
 
-Sweep log (`OperationalEvent`):
+**Two new columns on `Automation`:**
 
-```
-"test automation" [claude,hi]     : 3 matched, 3 enqueued, 0 errors
-"another test"    [(any word)]    : 1 matched, 1 enqueued, 0 errors
-```
+| Column | Meaning |
+|---|---|
+| `storyReplyTriggerEnabled` | fire on story replies |
+| `storyId` | `null` = any story · set = **that one story only** |
 
-`DmLog` — 4 rows, all **SENT**, no errors, delivered 07:04:57–07:04:58:
+Worker matching lives in `processMessage` (`lib/queue/dm-worker.ts`): a story reply widens the
+query to three OR arms — every-DM campaigns, any-story campaigns, and (only when an id is
+present) campaigns pinned to that exact story. Ordinary DMs keep `dmTriggerEnabled` as a
+**top-level** key on purpose, which keeps the existing worker test green. A story reply with
+**no** id can only match an "any story" campaign.
 
-| commenter | comment | matched keyword | status |
-|---|---|---|---|
-| abdalrhmanraed | `hi` | `hi` | SENT |
-| abdalrhmanraed | `claude` | `claude` | SENT |
-| abdalrhmanraed | `Claude` | `claude` | SENT (case-insensitive confirmed) |
-| abdalrhmanraed | `salam` | — (any-word campaign) | SENT |
+**UI:** `a story` is now a peer of post/reel in the trigger radio (ManyChat-style) → then
+`any story` / `a specific story` → live picker (`components/story-picker.tsx`) showing
+"expires in Xh", backed by new `getUserStories()` and `app/api/instagram/stories/route.ts`.
 
-Delivered by the **polling reconciler**, not webhooks — `WebhookEvent` was still 0 at that point.
+**Deliberately simpler than the post picker:** no caption search (stories have no captions), no
+pagination (a 24h window is never big), no session cache (a cached thumbnail of an expired story
+is worse than a spinner).
 
-## Correction to Part 2
+**Meta compliance:** only the story **id** is persisted. `media_url` is display-only and
+re-fetched live — Meta forbids storing story media.
 
-Part 2 predicted that Standard Access would hide comments from ordinary followers and only
-expose tester accounts. **That was too pessimistic.** After publishing, the comments edge
-returns everyone — @ti_8ip, @rdd66631, @eihab07, @brahim_amro and others all came back. The
-gate was the app being unpublished, not the commenter lacking a role.
+## 3.2 Four bugs fixed (all upstream-worthy)
 
-Still unverified: whether a *private reply* can be **sent** to a non-tester. All four
-confirmed sends went to `abdalrhmanraed`, which is a tester. Test with a non-tester commenter
-before assuming Advanced Access is unnecessary.
+These break OpenReply for **any** new user. Worth a PR to `upstream`.
 
-## Webhooks now live (instant instead of ≤5 min)
+| File | Bug | Symptom |
+|---|---|---|
+| `lib/meta/oauth.ts` | OAuth pointed at `api.instagram.com` — the **deprecated Basic Display host**, dead since Dec 2024, now **404** | "Sorry, this page isn't available" instead of a consent screen. Moved to `www.instagram.com`. The **token** endpoint on `api.instagram.com` is still correct and was left alone (verified: returns `400 Invalid authorization code`, not 404). |
+| `package.json` | worker never loaded `.env` | `next dev` auto-loads it, `tsx` does not, and nothing under `worker/` imports `dotenv`. Worker booted with no `DATABASE_URL` — while `lib/queue/client.ts` uses `process.env.REDIS_URL!` (non-null assertion) so ioredis *silently* fell back to a default and looked healthy. Fixed with `--env-file-if-exists=.env`. |
+| `next.config.ts` | no `allowedDevOrigins` | Behind an HTTPS tunnel, Next blocked its own `/_next/*` client chunks. Page HTML returned 200 but React never hydrated — **every page stuck on a loading skeleton**. The tell: no `/api/*` request ever reached the server, only page routes. Derived from `NEXTAUTH_URL` so it follows the tunnel. |
+| `app/api/automations/route.ts` | refine demanded a post | Any post-less campaign was rejected, so **DM-only campaigns were forced to pick a post they never use**. Widened to also accept `storyReplyTriggerEnabled` or `dmTriggerEnabled`. |
 
-- Callback `https://filtratable-reforgeable-alba.ngrok-free.dev/api/webhook`, verify token from `.env`.
-- Meta's challenge hit the server and returned **200** (confirmed in the dev log).
-- Account subscription verified via API:
-  `subscribed_apps -> [{"id":"18450348835189062","subscribed_fields":["comments","messages"]}]`
-- Use-case sections 1, 3 and 4 all green.
+## 3.3 Local-only config (not committed)
 
-## Repo bugs found and fixed (all worth upstreaming)
-
-1. `lib/meta/oauth.ts:10` — OAuth pointed at the dead `api.instagram.com` host (404).
-2. `package.json:13` — worker never loaded `.env`.
-3. `next.config.ts` — no `allowedDevOrigins`, so every page hung on its skeleton behind a tunnel.
-
-## Remaining
-
-- **App Review + business verification** for Advanced Access, if non-tester commenters turn
-  out to need it.
-- The tunnel process must stay running. If it dies:
-  `ngrok http 3000 --url=filtratable-reforgeable-alba.ngrok-free.dev` — same URL, no Meta reconfiguration.
-- Production deploy (Vercel + Railway) still pending.
+- `.env` — gitignored.
+- `docker-compose.override.yml` — gitignored. Remaps Postgres to **5434** and Redis to **6380**
+  because 5432/6379 are taken by an unrelated `postiz` stack on this machine. Needs the
+  `!override` tag; Compose **appends** list fields by default, so a plain override tried to bind
+  both ports and failed.
 
 ---
 
-# Part 4 — Access model, limits, and risk (verified against Meta docs, 2026-08-22)
+# 4. Current state
 
-## Settled: a fully external commenter works
+## 4.1 Local (running, dies with the terminal session)
 
-An account with **no role on the app and no link to the Facebook account** commented, and the
-automation fired and delivered. This closes the question left open in Part 3 and **corrects
-the caution there**: the commenter never needs a role. Standard Access was never about them.
+| Piece | Where |
+|---|---|
+| Web app | `localhost:3000` |
+| Postgres | **5434** (docker) |
+| Redis | **6380** (docker) |
+| Mailpit (login emails) | SMTP 1025, **web UI `localhost:8025`** |
+| Tunnel | ngrok static domain |
 
-## Where the Standard / Advanced line actually falls
+**Login has no dev bypass.** `lib/auth.ts` has exactly one provider — no Credentials fallback,
+no `NODE_ENV` branch, no console-logged link. Locally we point `EMAIL_SERVER` at Mailpit and
+read the magic link at `localhost:8025`.
 
-Meta's App Review docs define it by **whose Instagram account is connected**, not by who
-interacts with it:
+Cold start:
+
+    open -a Docker                     # wait for the daemon
+    docker compose up -d               # postgres + redis
+    docker start mailpit
+    npm run dev                        # terminal 1
+    npm run worker                     # terminal 2
+    ngrok http 3000 --url=filtratable-reforgeable-alba.ngrok-free.dev   # terminal 3
+
+First time only: `npm install` (**not** `npm ci --omit=dev` — `prisma.config.ts` imports
+`dotenv/config` but `dotenv` isn't a declared dependency; it only resolves by hoisting),
+`npm run db:generate` (**the README omits this, so its quickstart crashes**), `npm run db:migrate`.
+
+## 4.2 Production — Railway: DONE
+
+Hobby plan, project `83f542b3-c97d-4bfd-8dda-02df6b352bd3`.
+
+| Service | State |
+|---|---|
+| Postgres | Online · **17 tables migrated** · public access on |
+| Redis | Online |
+| `openreplay` (worker) | Online · log shows `[DM Worker] Started` |
+
+Worker: Build `npm run db:generate`, Start `npm run worker`, 11 env vars using Railway variable
+references for `DATABASE_URL` and `REDIS_URL` so it uses the **private** network (no egress billed).
+
+## 4.3 Production — Vercel: NOT DONE
+
+Nothing deployed yet. This is the next step.
+
+## 4.4 Verified working
+
+- Comment → DM: **4 DMs sent**, `SENT`, no errors, case-insensitive matching confirmed
+- Story reply → DM: confirmed live by the owner
+- **150 tests passing**, typecheck clean, lint clean, 21 migrations
+- A **fully external** commenter (no app role, no link to the FB account) triggered it successfully
+
+---
+
+# 5. Meta platform facts (verified against docs)
+
+## 5.1 Access levels — the line that actually matters
+
+Defined by **whose Instagram account is connected**, not who interacts with it:
 
 | | Standard Access (what we have) | Advanced Access |
 |---|---|---|
 | Meta's wording | *"a business I own or manage"* | *"I am a Tech Provider and my app serves multiple businesses"* |
-| Connect **your own** accounts | ✅ | not needed |
-| Connect **clients'** accounts | ❌ | ✅ required |
+| Your own accounts | works | not needed |
+| **Clients'** accounts | blocked | required |
 | App Review | not required | required |
-| Business verification | not required | required (needs a registered legal entity) |
+| Business verification | not required | required (registered legal entity) |
 
-So: **running OpenReply on your own Instagram accounts needs nothing further.** The moment a
-customer connects *their* account, App Review + business verification become mandatory.
+**Because this is personal-use only, nothing further is needed.** App Review only becomes
+mandatory if the owner ever lets other people connect their own Instagram accounts.
 
-## Rate limits (per Instagram professional account)
+## 5.2 The app MUST be published
+
+**Publishing was the single fix that made everything work.** Before/after on the same token and
+post: `/{media}/comments` returned **0** while unpublished, **8** after publishing. Instagram
+reports `comments_count` but serves no comment data to a Development-mode app.
+
+⚠️ **An earlier assumption in this project was wrong and cost hours:** the polling reconciler
+does *not* let you skip publishing. It bypasses **webhooks**, not the **access level** — it calls
+the same Graph API, which is gated by publish state.
+
+## 5.3 Rate limits (per Instagram professional account)
 
 | API | Limit |
 |---|---|
-| **Private Replies** — posts and reels | **750 / hour** |
-| Private Replies — live comments | 100 / second |
-| Send API — text, links, reactions | 100 / second |
-| Conversations API | 2 / second |
+| **Private replies — posts & reels** | **750 / hour** ← the one that matters |
+| Private replies — live comments | 100 / sec |
+| Send API — text, links | 100 / sec |
+| Conversations API | 2 / sec |
 
-The repo already enforces the 750/hour cap and **queues** the overflow rather than dropping
-it (`lib/utils/rate-limiter.ts`), so a viral reel degrades into a delay, not lost DMs.
+The repo enforces the 750/hour cap and **queues** overflow rather than dropping it.
 
-## Messaging rules that matter
+## 5.4 Policy rules
 
-- **24-hour window** — the app may only reply within 24 hours of the user's own action
-  (comment, DM, story reply, story mention). Outside it, only the `human_agent` tag (7 days).
-- **Automated-experience disclosure** — Meta requires disclosing automation at the start of a
-  thread, and specifically calls out California and German users.
-- One private reply per comment; the repo is idempotent per `commentId` (`DmLog` unique on
-  `automationId + commentId`), so retries cannot double-send.
+- **24-hour window** — you may only reply within 24h of *their* action (comment, DM, story
+  reply). Outside it, only the `human_agent` tag (7 days).
+- **Automation disclosure** required at the start of a thread; Meta names California and Germany.
+- One private reply per comment. The code is idempotent per `commentId`.
 
-## Ban risk — the honest read
+**Ban risk is low, and that is structural:** official Graph API only, no scraping, no browser
+automation, never touches the password, replies only on the account's own media, under Meta's
+documented cap. What *would* get you restricted: DMing people who never interacted, messaging
+outside the 24h window, identical spam at volume, hiding the automation disclosure.
 
-Low, because of *how* this is built, not because of luck:
+## 5.5 Versus ManyChat
 
-- Official Graph API only. No scraping, no browser automation, no password handling.
-- Replies only on the connected account's own media.
-- Under Meta's own documented cap, with overflow queued.
-- Self-comment filtering and per-comment dedup prevent loops and doubles.
-
-What would actually put the account at risk: unsolicited/bulk DMs to people who did not
-interact, messaging outside the 24-hour window, identical spammy copy at volume, or missing
-the automation disclosure. Those are policy violations regardless of tooling.
+**Identical permissions** — same three Instagram scopes, same 750/hour cap. ManyChat has no
+privileged access; they are simply a Tech Provider with Advanced Access, which is what lets them
+onboard *other people's* accounts. They stay ahead on multi-step flows, tags/segmentation,
+broadcasts, and other channels. The core comment→DM engine is at parity.
 
 ---
 
-# Part 5 — Story-reply automation (built 2026-08-22)
+# 6. Why we are leaving ngrok
 
-## What it does
+Two real failures, both hit by an actual follower:
 
-New per-campaign trigger: **`storyReplyTriggerEnabled`** — fire when someone replies to one of
-the account's stories.
+1. **`ERR_NGROK_6024`** — every first-time visitor to a tracked DM link sees ngrok's warning:
+   *"You should only visit this website if you trust whoever sent the link to you."* Devastating
+   for a link-in-DM product. **No free workaround** — it can only be skipped with an HTTP header,
+   which a browser navigation cannot send. We never saw it because dismissing it sets a cookie.
+2. **`ERR_NGROK_3200`** — the tunnel dropped while a follower was clicking. Dead link.
 
-| Flag | Fires on |
-|---|---|
-| `dmTriggerEnabled` (existing) | **any** inbound DM, story replies included |
-| `storyReplyTriggerEnabled` (new) | **story replies only** |
+**Accepted casualty:** 3 tracked links already sent in DMs point at the ngrok domain and **die
+permanently** once it is gone. New DMs use the new domain.
 
-Both can be on. Keyword matching is untouched, so `matchAnyWord` gives "reply to *any* story
-reply" for free — no extra field.
+## The complete URL inventory — 8 places
 
-## Why it was small
+Missing any one breaks something quietly:
 
-Instagram has **no comments on stories**. A story reply is delivered on the `messages` webhook
-we already subscribe to, as an ordinary message carrying `reply_to.story`. So story replies
-*already* reached the worker — they were simply indistinguishable from a plain DM. The feature
-is one flag threaded through, not a new pipeline. **No Meta console changes**: `messages` was
-already subscribed and `instagram_business_manage_messages` already granted.
+| # | Where | Setting | Breaks if wrong |
+|---|---|---|---|
+| 1 | Meta → Instagram → **Business login settings** | OAuth redirect URI | Connecting an account fails |
+| 2 | Meta → Instagram → **Configure webhooks** | Callback URL | Instant delivery stops (poller still covers, 5 min late) |
+| 3 | Meta → App settings → Basic | Privacy policy URL | publishing / review |
+| 4 | Meta → App settings → Basic | Terms of Service URL | same |
+| 5 | Meta → App settings → Basic | Data deletion URL | same |
+| 6 | **Vercel** env | `NEXTAUTH_URL` | login links, OAuth redirect |
+| 7 | **Railway worker** env | `NEXTAUTH_URL` | **tracked DM links point at the old domain** |
+| 8 | Local `.env` | `NEXTAUTH_URL` | local dev only |
 
-## Files changed
-
-| File | Change |
-|---|---|
-| `prisma/schema.prisma` + `prisma/migrations/20260822080000_add_story_reply_trigger/` | `storyReplyTriggerEnabled Boolean @default(false)` |
-| `lib/meta/webhook.ts` | `reply_to` on the message type; `isStoryReply` on `WebhookMessageEvent`, **spread in only when true** so a plain DM keeps its exact previous shape (the existing tests use strict `toEqual`) |
-| `lib/queue/client.ts` | `isStoryReply?: boolean` on `ProcessMessageJob` — optional, so jobs queued before the deploy stay valid |
-| `app/api/webhook/route.ts` | pass the flag into `queue.add` (hand-listed object, not a spread) |
-| `lib/queue/dm-worker.ts` | conditional `triggerWhere`: story replies match `OR: [dmTriggerEnabled, storyReplyTriggerEnabled]`; ordinary DMs keep `dmTriggerEnabled` top-level |
-| `app/api/automations/route.ts` | create schema, update schema, and the explicit `create({ data })` |
-| `components/campaign-builder.tsx` | toggle mirroring the `dmTriggerEnabled` block |
-| `components/campaign-preview.tsx` | reuses the existing `dmTrigger` thread, relabelled **"Story reply"** — no fifth tab |
-| `app/(dashboard)/campaigns/[id]/page.tsx` | summary line |
-
-The dedupe key stays `dm:${messageId}` — changing it would risk a double-send for any message
-already in flight.
-
-## Deliberately skipped
-
-- **Story mentions** (someone tags you in *their* story). They arrive with no text at all, so
-  they cannot be keyword-gated and need the attachment-only guard at `lib/meta/webhook.ts:208`
-  relaxed plus their own opt-in column. Add when actually wanted.
-- **Per-story targeting** — stories expire in 24h, so targeting one is near-worthless.
-- A separate preview tab — a story reply renders as the same DM thread.
-
-## Verified
-
-- `npm test` **147 passed** (was 142; +3 webhook parse, +2 worker selection) · typecheck clean · lint clean
-- Migration applied; `storyReplyTriggerEnabled` present on `Automation`
-- `/api/health` `ok`, worker healthy; the field round-trips through `GET /api/automations`
-- UI live: toggle, helper text, and the **"Story reply"** preview tab
-
-The two worker tests are the ones that matter — one asserts a story reply widens the query to
-both flags, the other asserts a plain DM does **not**, which is the whole point of the separate
-flag.
-
-## Not yet proven — needs a live story
-
-Meta populating `reply_to.story` is documented but **unverified on this account**. To confirm:
-post a story from `abd_thawabteh`, reply to it from `abdalrhmanraed`, then inspect the raw
-payload — it is already captured, no extra code needed:
-
-```sql
-SELECT payload FROM "WebhookEvent" ORDER BY "createdAt" DESC LIMIT 1;
-```
-
-Then the real test: a campaign with **only** `storyReplyTriggerEnabled` on must fire for a
-story reply and stay **silent** for an ordinary DM.
+**#7 is the trap:** `buildTrackedUrl` runs in the **worker**, not the web app. A worker left on
+the old URL keeps sending dead links after everything else looks correct.
 
 ---
 
-# Part 6 — Per-story targeting (built 2026-08-22)
+# 7. Decisions already made (do not re-litigate)
 
-## What it does
+| Decision | Rationale |
+|---|---|
+| **Subdomain**, not `leads-alchemy.online/openreply` | A subpath needs Next.js `basePath`, which rewrites every route, consumes the apex domain (bare domain becomes 404), lengthens every DM link, and has Auth.js edge cases. Owner was flexible. |
+| **Railway for everything**, ~$5/mo | The free trial had expired; the free plan's $1/mo credit does not cover a 24/7 worker. Owner subscribed to Hobby. |
+| **Resend** free tier for login email | 3,000/mo, only needed for the owner's own logins. |
+| Expired targeted story → **just stops matching**, labelled in the UI | No auto-deactivation, no silent widening to "any story". |
+| **No** "next story" auto-attach | Deferred. |
+| **No** story mentions | Deferred — needs its own opt-in column. |
+| Personal use, **no App Review** | Only needed to onboard other people's accounts. |
 
-"a story" is now a peer of post/reel in the trigger radio, ManyChat-style. Pick it, then choose
-**any story** or **a specific story** from a live picker of currently-active stories. Pinning to
-one story is what makes a story *sequence* work — story #2 in a sequence can carry its own
-campaign without stories #1 and #3 firing it.
+---
 
-## Verified before building, not assumed
+# 8. Traps and gotchas (the expensive lessons)
 
-**The webhook already carries the story id** — from the real payload of the user's own
-successful story reply:
+**Meta console**
+- There is **no "Instagram" sidebar item.** Everything is under **Use cases → Customize**.
+- The **Instagram App ID is not the Facebook App ID.**
+- `instagram_business_manage_comments` was **not** added by Meta's own "Add all required
+  permissions" button — it added the legacy `instagram_manage_comments` instead. Without it the
+  app connects fine and then does nothing.
+- **Tester invites are accepted on the WEB only:** `https://www.instagram.com/accounts/manage_access/`
+  → **Tester Invites** tab. The mobile app does not reliably surface it. The tab only appears
+  when an invite is actually pending.
+- Webhooks are only delivered when the app is **Live**.
 
-```json
-"reply_to": { "story": { "id": "17899092177578791", "url": "..." } }
-```
+**Railway**
+- Start/Build command fields **silently discard input if you press Tab.** Press **Enter**. Our
+  first deploy came up "Online" while running `next start` instead of the worker — looked
+  perfectly healthy, completely wrong. Always check the deploy log says `> openreply@0.1.0 worker`.
+- `DATABASE_PUBLIC_URL` **does not exist** until Settings → Networking → **Add Public Access**.
+  Vercel cannot reach Railway's private network.
 
-**The stories endpoint works on this account** — tested with the live decrypted token:
-`GET /me/stories` → HTTP 200, and the id matched the webhook exactly. No new Meta permission
-(`instagram_business_basic` covers it), no console change.
+**Git**
+- The original clone was `--depth 20`. Pushing a shallow clone to an empty repo fails with
+  *"did not receive expected object"*. Fix: `git fetch --unshallow upstream`.
 
-## Semantics
+**Testing**
+- The worker **deliberately skips the connected account's own comments** — Meta rejects a private
+  reply to yourself. Always test from `abdalrhmanraed`, never `abd_thawabteh`.
 
-| `storyReplyTriggerEnabled` | `storyId` | Fires on |
+---
+
+# 9. What is left to do
+
+| # | Task | Blocked on |
 |---|---|---|
-| false | — | never (story replies ignored) |
-| true | `null` | replies to **any** story |
-| true | set | replies to **that one story** only |
+| 1 | Enable public access on **Redis** (Settings → Networking) | nothing |
+| 2 | **Vercel**: import repo, set env vars (`NEXTAUTH_URL` = `https://openreply.leads-alchemy.online`, public Railway URLs, Meta secrets, Resend key), deploy | nothing — account logged in |
+| 3 | **DNS**: add `openreply` CNAME at Namecheap → Vercel target | nothing — account logged in |
+| 4 | **Resend**: create API key, verify `leads-alchemy.online` as sender domain (DNS records), set `RESEND_API_KEY` + `EMAIL_FROM` on Vercel | nothing — account logged in |
+| 5 | Update `NEXTAUTH_URL` on the **Railway worker** to the new domain (see §6 #7) | after #3 |
+| 6 | Update the **5 Meta URLs** to the new domain | after #3 |
+| 7 | **Reconnect Instagram** on production — the Railway DB is fresh and empty: no account, no campaigns | after #2–#6 |
+| 8 | Re-test end to end: comment→DM **and** story→DM on the new domain | after #7 |
+| 9 | Retire ngrok | after #8 passes |
 
-Worker selection (`lib/queue/dm-worker.ts`), flat OR arms so ordinary DMs keep
-`dmTriggerEnabled` top-level:
+**Note on #7:** production Postgres is a brand-new database. Everything must be recreated there —
+log in, connect Instagram, rebuild campaigns. Nothing migrates automatically from local.
 
-```ts
-OR: [
-  { dmTriggerEnabled: true },
-  { storyReplyTriggerEnabled: true, storyId: null },
-  ...(storyId ? [{ storyReplyTriggerEnabled: true, storyId }] : []),
-]
-```
+### Optional follow-ups
+- PR the four bug fixes to `upstream` (`diwenne/openreply`).
+- Story **mentions** support.
+- "Next story" auto-attach (the repo already has a `pendingNextReel` + cron pattern to copy).
+- Facebook Pages / WhatsApp as additional channels (same Meta app).
 
-A story reply with **no** id can only ever match an "any story" campaign — a pinned campaign
-must not fire on an unidentified story. There is a test for exactly that.
+---
 
-## Files changed
+# 10. Useful commands
 
-| File | Change |
-|---|---|
-| `prisma/schema.prisma` + `migrations/20260822110000_add_story_target/` | `storyId String?` |
-| `lib/meta/webhook.ts` | carry `reply_to.story.id`, spread in only when present |
-| `lib/queue/client.ts`, `app/api/webhook/route.ts` | thread `storyId` into the job |
-| `lib/queue/dm-worker.ts` | the three-arm OR above |
-| `lib/meta/client.ts` | **new** `getUserStories()` — no pagination; a 24h window is not a library |
-| `app/api/instagram/stories/route.ts` | **new**, mirrors the posts route, `dynamic = "force-dynamic"` |
-| `components/story-picker.tsx` | **new** — no caption search, no pagination, no session cache; shows "expires in Xh" and flags a pinned story that has since expired |
-| `components/campaign-builder.tsx` | `"story"` trigger scope + nested any/specific + picker; hydration branch placed **before** the `"specific"` fallback, which otherwise swallows every post-less campaign |
-| `app/api/automations/route.ts` | `storyId` in both schemas + create; **refine widened** |
-| `app/(dashboard)/campaigns/[id]/page.tsx` | summary says "one specific story" vs "a story" |
+    # health (local)
+    curl -s localhost:3000/api/health | python3 -m json.tool
 
-## Pre-existing bug fixed along the way
+    # the same four gates CI runs
+    npm run typecheck && npm run lint && npm test && npm run build
 
-`app/api/automations/route.ts` required `matchAnyPost || pendingNextReel || postId`, so **any
-post-less campaign was rejected**. That already forced a DM-only campaign to pick a post it
-never used. The predicate now also accepts `storyReplyTriggerEnabled || dmTriggerEnabled`.
+    # what fired, and why
+    docker exec openreplay-postgres-1 psql -U postgres -d openreply -x -c \
+      'SELECT "commenterName","commentText","matchedKeyword",status,"errorMessage" FROM "DmLog" ORDER BY "createdAt" DESC LIMIT 10;'
 
-## Meta compliance
+    # poller sweeps / worker errors. Rows are written ONLY when something was
+    # enqueued or failed — an empty table means clean sweeps, not a broken worker.
+    docker exec openreplay-postgres-1 psql -U postgres -d openreply -tAc \
+      'SELECT level, message FROM "OperationalEvent" ORDER BY "createdAt" DESC LIMIT 10;'
 
-Only the story **id** is persisted. `media_url` is display-only and re-fetched live every time
-the picker opens — Meta forbids storing or caching story media.
+    # raw webhook payloads (how we proved reply_to.story exists)
+    docker exec openreplay-postgres-1 psql -U postgres -d openreply -tAc \
+      'SELECT payload::text FROM "WebhookEvent" ORDER BY "createdAt" DESC LIMIT 1;'
 
-## Verified
+    # production migrations (password lives in Railway → Postgres → Variables)
+    DATABASE_URL="postgresql://postgres:<PW>@reseau.proxy.rlwy.net:21321/railway" npm run db:migrate
 
-- **150 tests passing** (was 147) · typecheck clean · lint clean
-- Migration applied; `/api/health` ok, worker healthy
-- `GET /api/instagram/stories` returns the live story (`17899092177578791`)
-- UI confirmed: "a story" radio → any/specific → picker rendering the real story with
-  **"expires in 22h"**
-
-## Not yet proven — needs two stories
-
-Post **two** stories, pin a campaign to story #1, then from `abdalrhmanraed` reply to **both**.
-Story #1 must fire and **story #2 must not** — that second half is what distinguishes real
-targeting from an alias for "any story".
+**Diagnostics UI:** `/diagnostics` shows queue depth, worker heartbeat, webhook failures and DM
+failures with reasons. `/logs` shows every send, skip and failure.
