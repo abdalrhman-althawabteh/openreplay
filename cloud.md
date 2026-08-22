@@ -160,9 +160,26 @@ Hobby plan, project `83f542b3-c97d-4bfd-8dda-02df6b352bd3`.
 Worker: Build `npm run db:generate`, Start `npm run worker`, 11 env vars using Railway variable
 references for `DATABASE_URL` and `REDIS_URL` so it uses the **private** network (no egress billed).
 
-## 4.3 Production — Vercel: NOT DONE
+## 4.3 Production — Vercel: DONE
 
-Nothing deployed yet. This is the next step.
+Project `openreplay` under team `abds-projects-4060b6c7` (Hobby), deployed from GitHub.
+
+- **Live at `https://openreply.leads-alchemy.online`** — `/api/health` returns `ok` with all
+  four checks green, including the Railway worker's heartbeat seen from Vercel.
+- 13 env vars set via the **Vercel CLI** (`vercel env add`), not the dashboard — see the traps.
+- DNS: `A openreply -> 76.76.21.21` at Namecheap. Existing `@`, `www` and Google MX untouched.
+
+## 4.3b Email — Resend: DONE
+
+Sending domain **`mail.leads-alchemy.online`** (a subdomain on purpose — the root already has
+Google Workspace MX and Resend's MX would have clashed).
+
+All three records **verified**: DKIM `TXT resend._domainkey.mail`, SPF `TXT rsend.mail`,
+`MX rsend.mail -> feedback-smtp.ap-northeast-1.amazonses.com` (prio 10). Domain reports
+`partially_verified`, which is Resend's wording when sending is verified but optional
+receiving/DMARC is not — sending works.
+
+`EMAIL_FROM = OpenReply <login@mail.leads-alchemy.online>`, API key `openreply-production`.
 
 ## 4.4 Verified working
 
@@ -249,6 +266,9 @@ permanently** once it is gone. New DMs use the new domain.
 
 Missing any one breaks something quietly:
 
+**All 8 are now pointed at `openreply.leads-alchemy.online`** (the ngrok OAuth redirect was
+deliberately *kept alongside* the new one — Meta allows multiple, so local dev still works).
+
 | # | Where | Setting | Breaks if wrong |
 |---|---|---|---|
 | 1 | Meta → Instagram → **Business login settings** | OAuth redirect URI | Connecting an account fails |
@@ -311,20 +331,20 @@ the old URL keeps sending dead links after everything else looks correct.
 
 # 9. What is left to do
 
-| # | Task | Blocked on |
-|---|---|---|
-| 1 | Enable public access on **Redis** (Settings → Networking) | nothing |
-| 2 | **Vercel**: import repo, set env vars (`NEXTAUTH_URL` = `https://openreply.leads-alchemy.online`, public Railway URLs, Meta secrets, Resend key), deploy | nothing — account logged in |
-| 3 | **DNS**: add `openreply` CNAME at Namecheap → Vercel target | nothing — account logged in |
-| 4 | **Resend**: create API key, verify `leads-alchemy.online` as sender domain (DNS records), set `RESEND_API_KEY` + `EMAIL_FROM` on Vercel | nothing — account logged in |
-| 5 | Update `NEXTAUTH_URL` on the **Railway worker** to the new domain (see §6 #7) | after #3 |
-| 6 | Update the **5 Meta URLs** to the new domain | after #3 |
-| 7 | **Reconnect Instagram** on production — the Railway DB is fresh and empty: no account, no campaigns | after #2–#6 |
-| 8 | Re-test end to end: comment→DM **and** story→DM on the new domain | after #7 |
-| 9 | Retire ngrok | after #8 passes |
+Everything infrastructural is **done**. What remains needs a human (OAuth consent) or a live post.
 
-**Note on #7:** production Postgres is a brand-new database. Everything must be recreated there —
-log in, connect Instagram, rebuild campaigns. Nothing migrates automatically from local.
+| # | Task | Who |
+|---|---|---|
+| 1 | **Log in** at `https://openreply.leads-alchemy.online/login` — magic link now arrives by real email via Resend, not Mailpit | owner |
+| 2 | **Connect Instagram** — production Postgres is a brand-new database: no account, no campaigns. This is an OAuth consent on the owner's account. | owner |
+| 3 | **Rebuild campaigns** there (nothing migrates from local) | owner |
+| 4 | Re-test end to end on the new domain: comment→DM **and** story→DM | both |
+| 5 | Retire ngrok once #4 passes: stop the tunnel, drop the ngrok OAuth redirect URI from Meta | either |
+
+**Done this session:** Redis public access · Vercel project + env + deploy · DNS A record ·
+Resend domain + key + verification · Railway worker already on the final `NEXTAUTH_URL` ·
+all five Meta URLs (privacy, terms, data-deletion, OAuth redirect, webhook callback — the
+webhook re-verified successfully against the new domain).
 
 ### Optional follow-ups
 - PR the four bug fixes to `upstream` (`diwenne/openreply`).
