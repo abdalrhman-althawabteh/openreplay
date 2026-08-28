@@ -14,6 +14,9 @@ const pageTitles: Record<string, string> = {
   "/campaigns/new": "New Campaign",
   "/automations": "Campaigns",
   "/automations/new": "New Campaign",
+  "/calendars": "Calendars",
+  "/forms": "Forms",
+  "/contacts": "Contacts",
   "/logs": "DM Logs",
   "/settings": "Settings",
   "/diagnostics": "Diagnostics",
@@ -31,7 +34,16 @@ export default function TopBar({
   instagramAccountCount,
 }: TopBarProps) {
   const pathname = usePathname();
-  const title = pageTitles[pathname] ?? "Dashboard";
+  // Longest match wins, so "/campaigns/new" beats "/campaigns" while a detail
+  // route like "/calendars/abc123" still falls back to its section title
+  // instead of the generic "Dashboard".
+  const title =
+    Object.keys(pageTitles)
+      .filter(
+        (path) => pathname === path || pathname.startsWith(`${path}/`)
+      )
+      .sort((a, b) => b.length - a.length)
+      .map((path) => pageTitles[path])[0] ?? "Dashboard";
 
   return (
     <header
