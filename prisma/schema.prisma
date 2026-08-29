@@ -456,15 +456,29 @@ model Calendar {
   // model if blocking a single day is ever needed.
   availability Json @default("{}")
 
+  // The form shown as one of the two booking steps. Null means the booking
+  // page only asks for name, email and phone.
+  formId String?
+
+  // ponytail: a boolean, not an ordered list — there are exactly two widgets,
+  // so there are exactly two orders. This becomes a real array only if a third
+  // step is ever added.
+  formFirst Boolean @default(true)
+
+  // The confirmation page shown after a successful booking.
+  successMessage String  @default("Thanks! We'll review your request and get back to you.")
+  redirectUrl    String?
+
   isActive  Boolean  @default(true)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  form      Form?     @relation(fields: [formId], references: [id], onDelete: SetNull)
   bookings  Booking[]
-  forms     Form[]
 
   @@index([workspaceId])
+  @@index([formId])
 }
 
 model Booking {
@@ -517,8 +531,6 @@ model Form {
   submitButtonLabel String  @default("Submit")
   successMessage    String  @default("Thanks! We'll be in touch.")
   redirectUrl       String?
-  // When set, submitting the form hands off to this calendar's booking page.
-  calendarId        String?
 
   // [{ id, type, label, placeholder?, required, options?[] }] — see
   // lib/forms/fields.ts for the authoritative shape and its zod schema.
@@ -529,11 +541,11 @@ model Form {
   updatedAt DateTime @updatedAt
 
   workspace   Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  calendar    Calendar?        @relation(fields: [calendarId], references: [id], onDelete: SetNull)
+  // A form can serve several calendars; the calendar owns the link.
+  calendars   Calendar[]
   submissions FormSubmission[]
 
   @@index([workspaceId])
-  @@index([calendarId])
 }
 
 model FormSubmission {

@@ -143,6 +143,37 @@ export function addDays(dateISO: string, days: number): string {
 }
 
 /**
+ * A month laid out as calendar weeks of ISO date strings.
+ *
+ * Always six rows of seven, padded with the tail of the previous month and the
+ * head of the next, so the grid never changes height as you page through
+ * months. `month` is 1-12.
+ */
+export function monthGrid(year: number, month: number): string[][] {
+  const firstOfMonth = new Date(Date.UTC(year, month - 1, 1));
+  // Back up to the Sunday on or before the 1st.
+  const start = new Date(
+    Date.UTC(year, month - 1, 1 - firstOfMonth.getUTCDay())
+  );
+  const startISO = start.toISOString().slice(0, 10);
+
+  const weeks: string[][] = [];
+  for (let week = 0; week < 6; week += 1) {
+    const days: string[] = [];
+    for (let day = 0; day < 7; day += 1) {
+      days.push(addDays(startISO, week * 7 + day));
+    }
+    weeks.push(days);
+  }
+  return weeks;
+}
+
+/** The month a date string belongs to, as "YYYY-MM". */
+export function monthOf(dateISO: string) {
+  return dateISO.slice(0, 7);
+}
+
+/**
  * Every bookable start time on `calendar` between two calendar dates.
  *
  * `busy` is the calendar's existing non-cancelled bookings. The buffer applies

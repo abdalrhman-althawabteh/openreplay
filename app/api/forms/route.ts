@@ -22,7 +22,6 @@ const formFields = {
     .union([z.string().url().max(500), z.literal("")])
     .nullable()
     .optional(),
-  calendarId: z.string().min(1).nullable().optional(),
   fields: formFieldsSchema,
   isActive: z.boolean(),
 };
@@ -36,7 +35,6 @@ const createFormSchema = z.object({
     "Thanks! We'll be in touch."
   ),
   redirectUrl: formFields.redirectUrl,
-  calendarId: formFields.calendarId,
   fields: formFields.fields.default([]),
   isActive: formFields.isActive.default(true),
 });
@@ -48,28 +46,9 @@ const updateFormSchema = z.object({
   submitButtonLabel: formFields.submitButtonLabel.optional(),
   successMessage: formFields.successMessage.optional(),
   redirectUrl: formFields.redirectUrl,
-  calendarId: formFields.calendarId,
   fields: formFields.fields.optional(),
   isActive: formFields.isActive.optional(),
 });
-
-/**
- * A form may only point at a calendar in the same workspace. Returns the value
- * to store, `undefined` to leave it alone, or `false` when the id is not ours.
- */
-async function resolveCalendarId(
-  workspaceId: string,
-  calendarId: string | null | undefined
-): Promise<string | null | false | undefined> {
-  if (calendarId === undefined) return undefined;
-  if (calendarId === null || calendarId === "") return null;
-
-  const calendar = await prisma.calendar.findFirst({
-    where: { id: calendarId, workspaceId },
-    select: { id: true },
-  });
-  return calendar ? calendar.id : false;
-}
 
 export async function GET(request: NextRequest) {
   const workspaceId = await getCurrentWorkspaceId();
@@ -86,7 +65,7 @@ export async function GET(request: NextRequest) {
     const form = await prisma.form.findFirst({
       where: { id: formId, workspaceId },
       include: {
-        calendar: { select: { id: true, name: true, slug: true } },
+        calendars: { select: { id: true, name: true, slug: true } },
         _count: { select: { submissions: true } },
       },
     });
@@ -106,7 +85,7 @@ export async function GET(request: NextRequest) {
     where: { workspaceId },
     orderBy: { createdAt: "desc" },
     include: {
-      calendar: { select: { id: true, name: true } },
+      calendars: { select: { id: true, name: true } },
       _count: { select: { submissions: true } },
     },
   });
@@ -145,24 +124,12 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const calendarId = await resolveCalendarId(
-    context.workspaceId,
-    parsed.data.calendarId
-  );
-  if (calendarId === false) {
-    return NextResponse.json(
-      { success: false, error: "Calendar not found" },
-      { status: 404 }
-    );
-  }
-
   const form = await prisma.form.create({
     data: {
       workspaceId: context.workspaceId,
       slug: publicSlug(parsed.data.name),
       ...parsed.data,
       redirectUrl: parsed.data.redirectUrl || null,
-      calendarId: calendarId ?? null,
     },
   });
 
@@ -216,17 +183,6 @@ export async function PATCH(request: NextRequest) {
     );
   }
 
-  const calendarId = await resolveCalendarId(
-    context.workspaceId,
-    parsed.data.calendarId
-  );
-  if (calendarId === false) {
-    return NextResponse.json(
-      { success: false, error: "Calendar not found" },
-      { status: 404 }
-    );
-  }
-
   // The slug survives a rename on purpose: the form link is already embedded
   // on the owner's website, and changing it would break every copy.
   const form = await prisma.form.update({
@@ -236,7 +192,6 @@ export async function PATCH(request: NextRequest) {
       ...(parsed.data.redirectUrl !== undefined
         ? { redirectUrl: parsed.data.redirectUrl || null }
         : {}),
-      ...(parsed.data.calendarId !== undefined ? { calendarId } : {}),
     },
   });
 

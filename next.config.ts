@@ -21,7 +21,9 @@ const nextConfig: NextConfig = {
   turbopack: {
     root: process.cwd(),
   },
-  ...(devOrigin ? { allowedDevOrigins: [devOrigin] } : {}),
+  // Next allows "localhost" implicitly but not the numeric loopback, so hitting
+  // the dev server on 127.0.0.1 would silently fail to hydrate.
+  allowedDevOrigins: ["127.0.0.1", ...(devOrigin ? [devOrigin] : [])],
 };
 
 export default nextConfig;

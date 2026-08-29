@@ -196,6 +196,19 @@ export function contactFromAnswers(fields: FormField[], answers: Answers) {
 }
 
 /**
+ * Whether these fields can produce an email address.
+ *
+ * A calendar may only attach a form that can: email is the key contacts are
+ * deduped on, so a booking form without one would silently create a new person
+ * every time the same customer books.
+ */
+export function capturesEmail(fields: FormField[]) {
+  return fields.some(
+    (field) => field.type === "email" || field.mapTo === "email"
+  );
+}
+
+/**
  * Render answers for a human: `{ "Which service?": "Coaching" }`, keyed by the
  * question rather than its id, so a booking's stored answers stay readable
  * even if the form is later edited.

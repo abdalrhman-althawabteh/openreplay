@@ -38,10 +38,39 @@ export async function GET(request: NextRequest) {
       : null;
   const skip = (page - 1) * limit;
 
+  // The three tabs. "upcoming" deliberately excludes cancelled ones: a
+  // cancelled appointment is not something still on the calendar.
+  const scope = searchParams.get("scope");
+  const now = new Date();
+  const scopeWhere =
+    scope === "upcoming"
+      ? { startsAt: { gte: now }, status: { not: BookingStatus.CANCELLED } }
+      : scope === "cancelled"
+        ? { status: BookingStatus.CANCELLED }
+        : {};
+
+  // Date window for the month grid. Both ends are optional.
+  const from = searchParams.get("from");
+  const to = searchParams.get("to");
+  const rangeWhere =
+    from || to
+      ? {
+          startsAt: {
+            ...(from ? { gte: new Date(`${from}T00:00:00.000Z`) } : {}),
+            ...(to ? { lt: new Date(`${to}T00:00:00.000Z`) } : {}),
+          },
+        }
+      : {};
+
   const where = {
     workspaceId,
     ...(calendarId && calendarId !== "all" ? { calendarId } : {}),
     ...(status ? { status } : {}),
+    ...scopeWhere,
+    ...rangeWhere,
+    // A range and "upcoming" both constrain startsAt; the range wins because
+    // the grid is showing a specific month, past or future.
+    ...(from || to ? { startsAt: rangeWhere.startsAt } : {}),
   };
 
   const [bookings, total] = await Promise.all([

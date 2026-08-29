@@ -21,7 +21,7 @@ interface FormRecord {
   submitButtonLabel: string;
   successMessage: string;
   redirectUrl: string | null;
-  calendarId: string | null;
+  calendars: { id: string; name: string }[];
   fields: FormField[];
   isActive: boolean;
 }
@@ -39,11 +39,6 @@ interface Submission {
   } | null;
 }
 
-interface CalendarOption {
-  id: string;
-  name: string;
-}
-
 const fieldClass =
   "w-full rounded border border-border bg-background px-3 py-2 text-sm";
 
@@ -53,7 +48,6 @@ export default function FormEditorPage() {
   const formId = params.id;
 
   const [form, setForm] = useState<FormRecord | null>(null);
-  const [calendars, setCalendars] = useState<CalendarOption[]>([]);
   const [submissions, setSubmissions] = useState<Submission[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -94,12 +88,6 @@ export default function FormEditorPage() {
     const timer = window.setTimeout(() => {
       void fetchForm();
       void fetchSubmissions();
-      void fetch("/api/calendars", { cache: "no-store" })
-        .then((res) => res.json())
-        .then((payload) => {
-          if (payload.success) setCalendars(payload.data);
-        })
-        .catch(console.error);
     }, 0);
     return () => window.clearTimeout(timer);
   }, [fetchForm, fetchSubmissions]);
@@ -124,7 +112,6 @@ export default function FormEditorPage() {
           submitButtonLabel: form.submitButtonLabel,
           successMessage: form.successMessage,
           redirectUrl: form.redirectUrl ?? "",
-          calendarId: form.calendarId,
           fields: form.fields,
           isActive: form.isActive,
         }),
@@ -276,50 +263,29 @@ export default function FormEditorPage() {
                 />
               </label>
               <label className="block">
-                <span className="mb-1.5 block text-sm">After they submit</span>
-                <select
-                  value={form.calendarId ?? ""}
+                <span className="mb-1.5 block text-sm">Thank-you message</span>
+                <input
+                  value={form.successMessage}
                   onChange={(e) =>
-                    patchForm({ calendarId: e.target.value || null })
+                    patchForm({ successMessage: e.target.value })
                   }
                   className={fieldClass}
-                >
-                  <option value="">Show a thank-you message</option>
-                  {calendars.map((calendar) => (
-                    <option key={calendar.id} value={calendar.id}>
-                      Send them to book: {calendar.name}
-                    </option>
-                  ))}
-                </select>
+                />
               </label>
             </div>
 
-            {!form.calendarId && (
-              <>
-                <label className="block">
-                  <span className="mb-1.5 block text-sm">Thank-you message</span>
-                  <input
-                    value={form.successMessage}
-                    onChange={(e) =>
-                      patchForm({ successMessage: e.target.value })
-                    }
-                    className={fieldClass}
-                  />
-                </label>
-                <label className="block">
-                  <span className="mb-1.5 block text-sm">
-                    Or send them to a URL{" "}
-                    <span className="text-muted">(optional)</span>
-                  </span>
-                  <input
-                    value={form.redirectUrl ?? ""}
-                    onChange={(e) => patchForm({ redirectUrl: e.target.value })}
-                    placeholder="https://…"
-                    className={fieldClass}
-                  />
-                </label>
-              </>
-            )}
+            <label className="block">
+              <span className="mb-1.5 block text-sm">
+                Or send them to a URL{" "}
+                <span className="text-muted">(optional)</span>
+              </span>
+              <input
+                value={form.redirectUrl ?? ""}
+                onChange={(e) => patchForm({ redirectUrl: e.target.value })}
+                placeholder="https://…"
+                className={fieldClass}
+              />
+            </label>
 
             <label className="flex items-center gap-2.5 text-sm">
               <input

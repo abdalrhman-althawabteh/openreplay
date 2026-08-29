@@ -42,7 +42,6 @@ export async function POST(request: NextRequest, { params }: RouteProps) {
       workspaceId: true,
       fields: true,
       redirectUrl: true,
-      calendar: { select: { slug: true, isActive: true } },
     },
   });
 
@@ -99,12 +98,10 @@ export async function POST(request: NextRequest, { params }: RouteProps) {
     });
   });
 
-  // Where to send them next: a linked booking page wins, then an explicit
-  // redirect, then nothing (the form shows its own success message).
-  const redirectTo =
-    form.calendar && form.calendar.isActive
-      ? `/book/${form.calendar.slug}?s=${submission.id}`
-      : form.redirectUrl || null;
+  // A form that leads to a booking is now configured on the calendar and runs
+  // as one two-step widget at /book/<calendar>, so there is no hand-off here:
+  // either an explicit redirect, or the form's own thank-you message.
+  const redirectTo = form.redirectUrl || null;
 
   return NextResponse.json(
     { success: true, data: { submissionId: submission.id, redirectTo } },

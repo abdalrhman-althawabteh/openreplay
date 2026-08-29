@@ -19,7 +19,7 @@ interface FormSummary {
   slug: string;
   headline: string | null;
   isActive: boolean;
-  calendar: { id: string; name: string } | null;
+  calendars: { id: string; name: string }[];
   _count: { submissions: number };
 }
 
@@ -98,9 +98,9 @@ export default function FormsPage() {
     <div className="space-y-6">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <p className="max-w-2xl text-sm text-muted">
-          Build a form, copy its link, and put it on your website. Answers
-          become contacts, and you can send people straight to a booking page
-          afterwards.
+          Build a form, then either share its own link or attach it to a
+          calendar so the booking page asks these questions. Answers become
+          contacts either way.
         </p>
         <button
           onClick={createForm}
@@ -158,14 +158,15 @@ export default function FormsPage() {
               </div>
 
               <p className="mt-3 text-sm text-muted">
-                {form.calendar ? (
+                {form.calendars.length > 0 ? (
                   <>
-                    Sends people to{" "}
-                    <span className="text-foreground">{form.calendar.name}</span>{" "}
-                    to book
+                    Used by{" "}
+                    <span className="text-foreground">
+                      {form.calendars.map((c) => c.name).join(", ")}
+                    </span>
                   </>
                 ) : (
-                  "Not linked to a calendar"
+                  "Standalone — has its own link"
                 )}
               </p>
 

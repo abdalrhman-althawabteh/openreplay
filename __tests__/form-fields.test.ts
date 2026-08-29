@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   MAX_ANSWER_LENGTH,
+  capturesEmail,
   contactFromAnswers,
   labelAnswers,
   parseFields,
@@ -169,5 +170,34 @@ describe("parseFields", () => {
     expect(
       parseFields([field({ id: "dup" }), field({ id: "dup" })])
     ).toEqual([]);
+  });
+});
+
+describe("capturesEmail", () => {
+  it("accepts a form with an email-typed question", () => {
+    expect(capturesEmail([field({ id: "e", type: "email", label: "Email" })])).toBe(
+      true
+    );
+  });
+
+  it("accepts a short-answer question explicitly mapped to email", () => {
+    expect(
+      capturesEmail([
+        field({ id: "q", label: "Where do we reach you?", mapTo: "email" }),
+      ])
+    ).toBe(true);
+  });
+
+  it("rejects a form that only asks questions it cannot identify anyone by", () => {
+    expect(
+      capturesEmail([
+        field({ id: "n", label: "Name", mapTo: "name" }),
+        field({ id: "p", type: "phone", label: "Phone" }),
+      ])
+    ).toBe(false);
+  });
+
+  it("rejects an empty form", () => {
+    expect(capturesEmail([])).toBe(false);
   });
 });

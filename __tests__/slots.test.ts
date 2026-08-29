@@ -3,6 +3,8 @@ import {
   addDays,
   generateSlots,
   isBookableSlot,
+  monthGrid,
+  monthOf,
   todayInZone,
   weekdayOf,
   zonedTimeToUtc,
@@ -275,5 +277,55 @@ describe("isBookableSlot", () => {
         now,
       })
     ).toBe(false);
+  });
+});
+
+describe("monthGrid", () => {
+  it("is always six weeks of seven days", () => {
+    for (const [year, month] of [
+      [2026, 1],
+      [2026, 2],
+      [2026, 8],
+      [2027, 12],
+    ] as const) {
+      const weeks = monthGrid(year, month);
+      expect(weeks).toHaveLength(6);
+      expect(weeks.every((week) => week.length === 7)).toBe(true);
+    }
+  });
+
+  it("starts on the Sunday on or before the 1st", () => {
+    // 2026-03-01 is a Sunday, so the grid starts exactly on it.
+    expect(monthGrid(2026, 3)[0][0]).toBe("2026-03-01");
+    // 2026-08-01 is a Saturday, so the grid backs up to 2026-07-26.
+    expect(monthGrid(2026, 8)[0][0]).toBe("2026-07-26");
+  });
+
+  it("covers every day of the month exactly once", () => {
+    const days = monthGrid(2026, 2).flat();
+    // 2026 is not a leap year, so February ends on the 28th.
+    expect(days).toContain("2026-02-01");
+    expect(days).toContain("2026-02-28");
+    expect(days).not.toContain("2026-02-29");
+    expect(new Set(days).size).toBe(days.length);
+  });
+
+  it("includes 29 February in a leap year", () => {
+    const days = monthGrid(2028, 2).flat();
+    expect(days).toContain("2028-02-29");
+  });
+
+  it("runs consecutively with no gaps", () => {
+    const days = monthGrid(2026, 8).flat();
+    for (let i = 1; i < days.length; i += 1) {
+      expect(days[i]).toBe(addDays(days[i - 1], 1));
+    }
+  });
+
+  it("pads with the neighbouring months, and monthOf can tell them apart", () => {
+    const weeks = monthGrid(2026, 8);
+    expect(monthOf(weeks[0][0])).toBe("2026-07");
+    expect(monthOf("2026-08-15")).toBe("2026-08");
+    expect(monthOf(weeks[5][6])).toBe("2026-09");
   });
 });

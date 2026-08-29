@@ -4,6 +4,7 @@ import { getCurrentWorkspaceId } from "@/lib/auth";
 import { prisma } from "@/lib/db/client";
 import { publicSlug } from "@/lib/public-slug";
 import { availabilitySchema } from "@/lib/calendars/slots";
+import { capturesEmail, parseFields } from "@/lib/forms/fields";
 import {
   canManageWorkspace,
   getCurrentWorkspaceContext,
@@ -37,6 +38,14 @@ const calendarFields = {
   maxDaysAhead: z.number().int().min(1).max(365),
   availability: availabilitySchema,
   isActive: z.boolean(),
+  // Empty string means "no form", which is how a cleared <select> arrives.
+  formId: z.union([z.string().min(1), z.literal("")]).nullable().optional(),
+  formFirst: z.boolean(),
+  successMessage: z.string().min(1).max(500),
+  redirectUrl: z
+    .union([z.string().url().max(500), z.literal("")])
+    .nullable()
+    .optional(),
 };
 
 const createCalendarSchema = z.object({
@@ -49,6 +58,12 @@ const createCalendarSchema = z.object({
   maxDaysAhead: calendarFields.maxDaysAhead.default(30),
   availability: calendarFields.availability.default({}),
   isActive: calendarFields.isActive.default(true),
+  formId: calendarFields.formId,
+  formFirst: calendarFields.formFirst.default(true),
+  successMessage: calendarFields.successMessage.default(
+    "Thanks! We'll review your request and get back to you."
+  ),
+  redirectUrl: calendarFields.redirectUrl,
 });
 
 const updateCalendarSchema = z.object({
@@ -61,7 +76,42 @@ const updateCalendarSchema = z.object({
   maxDaysAhead: calendarFields.maxDaysAhead.optional(),
   availability: calendarFields.availability.optional(),
   isActive: calendarFields.isActive.optional(),
+  formId: calendarFields.formId,
+  formFirst: calendarFields.formFirst.optional(),
+  successMessage: calendarFields.successMessage.optional(),
+  redirectUrl: calendarFields.redirectUrl,
 });
+
+/**
+ * Resolve the form a calendar should use.
+ *
+ * Returns the id to store, `undefined` to leave it alone, or an error string
+ * when the form is not ours or cannot identify the person booking.
+ */
+async function resolveFormId(
+  workspaceId: string,
+  formId: string | null | undefined
+): Promise<{ value?: string | null; error?: string }> {
+  if (formId === undefined) return {};
+  if (formId === null || formId === "") return { value: null };
+
+  const form = await prisma.form.findFirst({
+    where: { id: formId, workspaceId },
+    select: { fields: true },
+  });
+  if (!form) return { error: "Form not found" };
+
+  // Without an email there is no key to dedupe the contact on, so every
+  // booking would quietly create a new person.
+  if (!capturesEmail(parseFields(form.fields))) {
+    return {
+      error:
+        "That form has no email question, so bookings could not be matched to a contact. Add an email field to it first.",
+    };
+  }
+
+  return { value: formId };
+}
 
 export async function GET(request: NextRequest) {
   const workspaceId = await getCurrentWorkspaceId();
@@ -77,7 +127,10 @@ export async function GET(request: NextRequest) {
   if (calendarId) {
     const calendar = await prisma.calendar.findFirst({
       where: { id: calendarId, workspaceId },
-      include: { _count: { select: { bookings: true } } },
+      include: {
+        form: { select: { id: true, name: true, slug: true } },
+        _count: { select: { bookings: true } },
+      },
     });
     if (!calendar) {
       return NextResponse.json(
@@ -95,6 +148,7 @@ export async function GET(request: NextRequest) {
     where: { workspaceId },
     orderBy: { createdAt: "desc" },
     include: {
+      form: { select: { id: true, name: true } },
       _count: { select: { bookings: true } },
     },
   });
@@ -150,11 +204,21 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  const form = await resolveFormId(context.workspaceId, parsed.data.formId);
+  if (form.error) {
+    return NextResponse.json(
+      { success: false, error: form.error },
+      { status: 400 }
+    );
+  }
+
   const calendar = await prisma.calendar.create({
     data: {
       workspaceId: context.workspaceId,
       slug: publicSlug(parsed.data.name),
       ...parsed.data,
+      formId: form.value ?? null,
+      redirectUrl: parsed.data.redirectUrl || null,
     },
   });
 
@@ -208,11 +272,25 @@ export async function PATCH(request: NextRequest) {
     );
   }
 
+  const form = await resolveFormId(context.workspaceId, parsed.data.formId);
+  if (form.error) {
+    return NextResponse.json(
+      { success: false, error: form.error },
+      { status: 400 }
+    );
+  }
+
   // The slug is deliberately never regenerated on rename: the booking link is
   // already out in the world, and changing it would break every copy of it.
   const calendar = await prisma.calendar.update({
     where: { id: calendarId },
-    data: parsed.data,
+    data: {
+      ...parsed.data,
+      ...(parsed.data.formId !== undefined ? { formId: form.value } : {}),
+      ...(parsed.data.redirectUrl !== undefined
+        ? { redirectUrl: parsed.data.redirectUrl || null }
+        : {}),
+    },
   });
 
   return NextResponse.json({ success: true, data: calendar });

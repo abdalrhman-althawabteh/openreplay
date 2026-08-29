@@ -3,6 +3,12 @@ import { z } from "zod";
 import { prisma } from "@/lib/db/client";
 import { upsertContactFromCapture } from "@/lib/contacts/upsert";
 import {
+  contactFromAnswers,
+  labelAnswers,
+  parseFields,
+  validateAnswers,
+} from "@/lib/forms/fields";
+import {
   addDays,
   availabilitySchema,
   dateStringSchema,
@@ -24,19 +30,27 @@ export const dynamic = "force-dynamic";
 
 type RouteProps = { params: Promise<{ slug: string }> };
 
-/** How far ahead one slots request may look, whatever range it asks for. */
-const MAX_RANGE_DAYS = 31;
+/**
+ * How far ahead one slots request may look, whatever range it asks for.
+ *
+ * A month grid is six weeks — 42 days including the padding from the
+ * neighbouring months — so anything smaller silently truncates the calendar
+ * the visitor is looking at.
+ */
+const MAX_RANGE_DAYS = 42;
 
+// When a form is attached it supplies the contact details, so name and email
+// are only required in the plain no-form case. Which of the two applies is
+// decided against the calendar, below — never against what the browser claims.
 const bookSchema = z.object({
   startsAt: z.string().datetime(),
   timezone: z.string().min(1).max(64),
-  name: z.string().min(1).max(120),
-  email: z.string().email().max(200),
+  name: z.string().max(120).optional().nullable(),
+  email: z.string().email().max(200).optional().nullable(),
   phone: z.string().max(40).optional().nullable(),
   notes: z.string().max(2000).optional().nullable(),
-  // Set when the visitor arrived from a form; carries their answers onto the
-  // booking so the owner sees them when deciding.
-  submissionId: z.string().max(64).optional().nullable(),
+  // The attached form's answers, keyed by field id.
+  answers: z.record(z.string(), z.unknown()).optional(),
 });
 
 async function loadCalendar(slug: string) {
@@ -53,6 +67,18 @@ async function loadCalendar(slug: string) {
       minNoticeHours: true,
       maxDaysAhead: true,
       availability: true,
+      formFirst: true,
+      successMessage: true,
+      redirectUrl: true,
+      form: {
+        select: {
+          id: true,
+          headline: true,
+          description: true,
+          submitButtonLabel: true,
+          fields: true,
+        },
+      },
     },
   });
 }
@@ -135,7 +161,17 @@ export async function GET(request: NextRequest, { params }: RouteProps) {
           description: calendar.description,
           timezone: calendar.timezone,
           durationMinutes: calendar.durationMinutes,
+          formFirst: calendar.formFirst,
+          successMessage: calendar.successMessage,
         },
+        form: calendar.form
+          ? {
+              headline: calendar.form.headline,
+              description: calendar.form.description,
+              submitButtonLabel: calendar.form.submitButtonLabel,
+              fields: parseFields(calendar.form.fields),
+            }
+          : null,
         range: { from: fromISO, to: toISO },
         slots: slots.map((slot) => slot.toISOString()),
       },
@@ -183,20 +219,48 @@ export async function POST(request: NextRequest, { params }: RouteProps) {
 
   const startsAt = new Date(parsed.data.startsAt);
   const slotCalendar = toSlotCalendar(calendar);
+  const country = getRequestCountry(request);
 
-  // Carry the form answers over, if the visitor came from one. Scoped to this
-  // workspace so a submission id from elsewhere reveals nothing.
-  const submission = parsed.data.submissionId
-    ? await prisma.formSubmission.findFirst({
-        where: {
-          id: parsed.data.submissionId,
-          workspaceId: calendar.workspaceId,
-        },
-        select: { id: true, answers: true, contactId: true, country: true },
-      })
-    : null;
+  // Whether a form applies is decided here, from the calendar, not from what
+  // the browser sent. The form's own questions are the schema for `answers`:
+  // unknown ids are rejected, required answers enforced, choices checked.
+  const fields = calendar.form ? parseFields(calendar.form.fields) : [];
+  let answers: ReturnType<typeof labelAnswers> | null = null;
+  let details: { name?: string; email?: string; phone?: string };
 
-  const country = getRequestCountry(request) ?? submission?.country ?? null;
+  if (calendar.form) {
+    const validated = validateAnswers(fields, parsed.data.answers ?? {});
+    if (!validated.ok) {
+      return NextResponse.json(
+        { success: false, error: validated.error },
+        { status: 400 }
+      );
+    }
+    details = contactFromAnswers(fields, validated.answers);
+    answers = labelAnswers(fields, validated.answers);
+
+    // capturesEmail() gates this when the form is attached, so a form without
+    // an email question cannot reach here — but a form edited afterwards could.
+    if (!details.email) {
+      return NextResponse.json(
+        { success: false, error: "This booking form is missing an email question." },
+        { status: 400 }
+      );
+    }
+  } else {
+    // No form attached: the widget asked for these three directly.
+    if (!parsed.data.name || !parsed.data.email) {
+      return NextResponse.json(
+        { success: false, error: "Name and email are required" },
+        { status: 400 }
+      );
+    }
+    details = {
+      name: parsed.data.name,
+      email: parsed.data.email,
+      phone: parsed.data.phone ?? undefined,
+    };
+  }
 
   const booking = await prisma.$transaction(async (tx) => {
     // ponytail: the conflict check and the insert share one transaction rather
@@ -217,16 +281,30 @@ export async function POST(request: NextRequest, { params }: RouteProps) {
     const contact = await upsertContactFromCapture(
       {
         workspaceId: calendar.workspaceId,
-        name: parsed.data.name,
-        email: parsed.data.email,
-        phone: parsed.data.phone,
+        name: details.name,
+        email: details.email,
+        phone: details.phone,
         country,
         source: "BOOKING",
       },
       tx
     );
 
-    const created = await tx.booking.create({
+    // Both steps land together. Someone who fills the form and never picks a
+    // time leaves nothing behind — no orphan submission, no half-made contact.
+    if (calendar.form && answers) {
+      await tx.formSubmission.create({
+        data: {
+          workspaceId: calendar.workspaceId,
+          formId: calendar.form.id,
+          contactId: contact.id,
+          answers,
+          country,
+        },
+      });
+    }
+
+    return tx.booking.create({
       data: {
         workspaceId: calendar.workspaceId,
         calendarId: calendar.id,
@@ -237,20 +315,9 @@ export async function POST(request: NextRequest, { params }: RouteProps) {
         ),
         timezone: parsed.data.timezone,
         notes: parsed.data.notes ?? null,
-        answers: submission?.answers ?? undefined,
+        answers: answers ?? undefined,
       },
     });
-
-    // Tie the submission to the same person, so the contact's history reads as
-    // one thread rather than two unrelated events.
-    if (submission && submission.contactId !== contact.id) {
-      await tx.formSubmission.update({
-        where: { id: submission.id },
-        data: { contactId: contact.id },
-      });
-    }
-
-    return created;
   });
 
   if (!booking) {
