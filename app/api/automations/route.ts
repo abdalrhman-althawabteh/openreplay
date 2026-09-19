@@ -6,6 +6,7 @@ import { calculateCtr, normalizeTopKeywords } from "@/lib/tracking/analytics";
 import { buildTrackedUrl } from "@/lib/tracking/message";
 import { generateTrackedLinkSlug } from "@/lib/tracking/server";
 import { buildReportUrl, generateReportShareSlug } from "@/lib/reports/share";
+import { archiveData } from "@/lib/automations/archive";
 import {
   canManageWorkspace,
   getCurrentWorkspaceContext,
@@ -62,6 +63,7 @@ const createAutomationSchema = z
     secondaryButtonLabel: z.string().max(20).optional().nullable(),
     isActive: z.boolean().optional().default(true),
     wholeWordMatch: z.boolean().optional().default(true),
+    folderId: z.string().nullable().optional(),
   })
   // A campaign must target a specific post, any post, or the next reel.
   // A story- or DM-driven campaign has no post at all, so requiring one here
@@ -118,6 +120,10 @@ const updateAutomationSchema = z.object({
   isActive: z.boolean().optional(),
   wholeWordMatch: z.boolean().optional(),
   reportShareEnabled: z.boolean().optional(),
+  // null = unfiled. Must belong to the workspace.
+  folderId: z.string().nullable().optional(),
+  // true = archive (also pauses), false = restore (stays paused).
+  archived: z.boolean().optional(),
   // Empty string clears the tracked link; a URL updates/creates it; undefined
   // leaves it unchanged.
   trackedDestinationUrl: z
@@ -131,6 +137,14 @@ const updateAutomationSchema = z.object({
     .nullable(),
   secondaryButtonLabel: z.string().max(20).optional().nullable(),
 });
+
+async function folderInWorkspace(folderId: string, workspaceId: string) {
+  const folder = await prisma.folder.findFirst({
+    where: { id: folderId, workspaceId },
+    select: { id: true },
+  });
+  return Boolean(folder);
+}
 
 export async function GET(request: NextRequest) {
   const workspaceId = await getCurrentWorkspaceId();
@@ -352,6 +366,14 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  const folderId = parsed.data.folderId ?? null;
+  if (folderId && !(await folderInWorkspace(folderId, workspaceId))) {
+    return NextResponse.json(
+      { success: false, error: "Folder not found" },
+      { status: 404 }
+    );
+  }
+
   const { trackedDestinationUrl, secondaryDestinationUrl, secondaryButtonLabel } =
     parsed.data;
 
@@ -440,6 +462,7 @@ export async function POST(request: NextRequest) {
         : null,
       isActive: parsed.data.isActive,
       wholeWordMatch: parsed.data.wholeWordMatch,
+      folderId,
       workspaceId,
       instagramAccountId: instagramAccount.id,
       reportShareSlug: generateReportShareSlug(),
@@ -513,8 +536,33 @@ export async function PATCH(request: NextRequest) {
     trackedDestinationUrl,
     secondaryDestinationUrl,
     secondaryButtonLabel,
+    archived,
     ...automationData
   } = parsed.data;
+
+  if (
+    automationData.folderId &&
+    !(await folderInWorkspace(automationData.folderId, workspaceId))
+  ) {
+    return NextResponse.json(
+      { success: false, error: "Folder not found" },
+      { status: 404 }
+    );
+  }
+
+  // Archive = hidden + stopped. Restore only un-hides; the owner re-activates
+  // deliberately. An archived campaign cannot be switched on in place.
+  const archivePatch = archiveData(archived);
+  if (
+    automationData.isActive === true &&
+    existing.archivedAt &&
+    archived !== false
+  ) {
+    return NextResponse.json(
+      { success: false, error: "Restore the campaign before activating it" },
+      { status: 400 }
+    );
+  }
 
   // Keep dependent fields consistent: any-word clears keywords; a disabled
   // opening DM clears its message and button.
@@ -551,7 +599,7 @@ export async function PATCH(request: NextRequest) {
 
   const updated = await prisma.automation.update({
     where: { id: automationId },
-    data: automationData,
+    data: { ...automationData, ...archivePatch },
   });
 
   // Update, create, or clear the campaign's primary tracked link when a

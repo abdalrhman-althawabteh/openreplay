@@ -39,8 +39,8 @@ If DMs never arrive, **check the worker first.** `/api/health` reports `worker.h
 
 | Thing | Value |
 |---|---|
-| Domain (owned) | `leads-alchemy.online` — DNS at **Namecheap** (`dns1/dns2.registrar-servers.com`) |
-| App URL (target) | **`openreply.leads-alchemy.online`** |
+| Domain (owned) | `a58lab.com` — DNS at **Namecheap** (`dns1/dns2.registrar-servers.com`). Replaced `leads-alchemy.online` on 2026-09-17 when its subscription lapsed. |
+| App URL (target) | **`openreply.a58lab.com`** |
 | Temporary dev URL | `filtratable-reforgeable-alba.ngrok-free.dev` — **being retired**, see §6 |
 | Meta app name | `Business` |
 | **Facebook** App ID | `2901649213548346` |
@@ -164,22 +164,22 @@ references for `DATABASE_URL` and `REDIS_URL` so it uses the **private** network
 
 Project `openreplay` under team `abds-projects-4060b6c7` (Hobby), deployed from GitHub.
 
-- **Live at `https://openreply.leads-alchemy.online`** — `/api/health` returns `ok` with all
+- **Live at `https://openreply.a58lab.com`** — `/api/health` returns `ok` with all
   four checks green, including the Railway worker's heartbeat seen from Vercel.
 - 13 env vars set via the **Vercel CLI** (`vercel env add`), not the dashboard — see the traps.
 - DNS: `A openreply -> 76.76.21.21` at Namecheap. Existing `@`, `www` and Google MX untouched.
 
 ## 4.3b Email — Resend: DONE
 
-Sending domain **`mail.leads-alchemy.online`** (a subdomain on purpose — the root already has
+Sending domain **`mail.a58lab.com`** (a subdomain on purpose — the root already has
 Google Workspace MX and Resend's MX would have clashed).
 
-All three records **verified**: DKIM `TXT resend._domainkey.mail`, SPF `TXT rsend.mail`,
-`MX rsend.mail -> feedback-smtp.ap-northeast-1.amazonses.com` (prio 10). Domain reports
+All three records **verified**: DKIM `TXT resend._domainkey.mail`, `CNAME rsend.mail -> rsend-apne1.forge.rmta.net`,
+`CNAME send.mail -> send.forge.rmta.net` (Resend moved from MX+TXT to CNAMEs in 2026-09). Domain reports
 `partially_verified`, which is Resend's wording when sending is verified but optional
 receiving/DMARC is not — sending works.
 
-`EMAIL_FROM = OpenReply <login@mail.leads-alchemy.online>`, API key `openreply-production`.
+`EMAIL_FROM = OpenReply <login@mail.a58lab.com>`, API key `openreply-production`.
 
 ## 4.4 Verified working
 
@@ -187,6 +187,24 @@ receiving/DMARC is not — sending works.
 - Story reply → DM: confirmed live by the owner
 - **150 tests passing**, typecheck clean, lint clean, 21 migrations
 - A **fully external** commenter (no app role, no link to the FB account) triggered it successfully
+
+**Re-verified end to end on `openreply.a58lab.com` (2026-08-22, after the #9 fix):**
+
+- Campaign built in the production UI (post picker, keyword, message, link button) — saved fine
+- Comment `vtest` from `abdalrhmanraed` → DM **in the same second** (14:55:0x → 14:55:11 UTC).
+  Before the fix the identical test took ~90 s and `/diagnostics` credited the comment sweep.
+- Story reply → DM fired too, from the backlog Meta flushed on save
+- DM payload read back from Graph API to prove the link survives:
+  `attachments.data[0].generic_template.cta[0].url` = `https://openreply.a58lab.com/r/…`
+  — so **the worker's `NEXTAUTH_URL` is correct** (trap #7 is clear)
+- Tracked link `302 →` destination, click recorded, campaign CTR 100 %
+- `/api/health` green including the Railway worker's heartbeat seen from Vercel
+
+**Instagram web does not render the CTA button.** The thread shows the title text only and the
+inbox preview says *"sent an attachment"*. This is a client-side rendering gap, **not** a bug —
+the button is in the payload and shows in the mobile app. Read it back with:
+
+    GET /{message-id}?fields=attachments
 
 ---
 
@@ -262,26 +280,52 @@ Two real failures, both hit by an actual follower:
 **Accepted casualty:** 3 tracked links already sent in DMs point at the ngrok domain and **die
 permanently** once it is gone. New DMs use the new domain.
 
-## The complete URL inventory — 8 places
+## The complete URL inventory — 9 places
 
 Missing any one breaks something quietly:
 
-**All 8 are now pointed at `openreply.leads-alchemy.online`** (the ngrok OAuth redirect was
+**All 9 are now pointed at `openreply.a58lab.com`** (the ngrok OAuth redirect was
 deliberately *kept alongside* the new one — Meta allows multiple, so local dev still works).
 
 | # | Where | Setting | Breaks if wrong |
 |---|---|---|---|
 | 1 | Meta → Instagram → **Business login settings** | OAuth redirect URI | Connecting an account fails |
-| 2 | Meta → Instagram → **Configure webhooks** | Callback URL | Instant delivery stops (poller still covers, 5 min late) |
+| 2 | Meta → Use cases → Customize → **Webhooks → Instagram** | Callback URL | Nothing — see #9. This screen is *not* the one that delivers for an Instagram-login app. |
+| 2b | Meta app-level subscription (`GET /{app-id}/subscriptions`) | `callback_url` + `fields` | Mirrors #2; must list `comments` and `messages` |
 | 3 | Meta → App settings → Basic | Privacy policy URL | publishing / review |
 | 4 | Meta → App settings → Basic | Terms of Service URL | same |
 | 5 | Meta → App settings → Basic | Data deletion URL | same |
 | 6 | **Vercel** env | `NEXTAUTH_URL` | login links, OAuth redirect |
 | 7 | **Railway worker** env | `NEXTAUTH_URL` | **tracked DM links point at the old domain** |
 | 8 | Local `.env` | `NEXTAUTH_URL` | local dev only |
+| **9** | Meta → Instagram API → **API setup with Instagram login → 3. Configure webhooks** | Callback URL | **ALL webhook delivery stops.** This is the effective config for this app. |
 
 **#7 is the trap:** `buildTrackedUrl` runs in the **worker**, not the web app. A worker left on
 the old URL keeps sending dead links after everything else looks correct.
+
+**#9 is the bigger trap, and it cost a whole extra test round (2026-08-22).** There are *two*
+webhook screens in the Meta console and they are not the same setting. #2 is the generic
+"Use cases → Customize → Webhooks" page. #9 lives inside the Instagram-login product itself.
+For **Instagram API with Instagram login** — which is what this app uses — **only #9 delivers.**
+Meta says so in a banner on screen #2: *"Webhook configurations for Instagram API with Instagram
+business login are supported only within the product itself."*
+
+#2, #2b and the per-account `subscribed_apps` all read perfectly correct while #9 still pointed
+at the dead ngrok tunnel, so **every diagnostic looked green and zero webhooks arrived.** The
+symptom is silent and specific: comment→DM still works but always lands ~1–5 min late, and
+`/diagnostics` shows every send preceded by a `Comment sweep … 1 enqueued` line. That means the
+**poller** did it, not the webhook. Story replies fail *completely* — the poller only sweeps
+comments, never `messages`.
+
+Fastest way to tell webhooks apart from the poller:
+
+    npx vercel logs openreply.a58lab.com | grep -i 'api/webhook'
+
+No `POST /api/webhook` around the time you commented ⇒ Meta is not delivering, and #9 is the
+first place to look. Note editing #9 requires **re-typing the verify token** — Meta greys out
+"Verify and save" until you do, with the tooltip *"Re-enter your verify token."* Saving #9 did
+**not** wipe the field subscriptions (unlike #2), and Meta immediately flushes its queued
+backlog, so expect a burst of deliveries — and a burst of real DMs — the moment it saves.
 
 ---
 
@@ -337,6 +381,20 @@ the old URL keeps sending dead links after everything else looks correct.
   Retest with a *fresh* comment. It is also invisible in the logs — `recordSweep` only writes
   a row when something was enqueued or errored, so "matched but skipped" leaves no trace.
 
+**Domain move 2026-09-17 — `leads-alchemy.online` → `a58lab.com`**
+- Done by CLI/API: Vercel domain + `NEXTAUTH_URL`/`EMAIL_FROM` env + redeploy, Namecheap `A openreply -> 76.76.21.21`,
+  Railway worker `NEXTAUTH_URL` (redeployed, heartbeat restarted), Meta Basic URLs (#3–5), OAuth redirect (#1, old removed),
+  app-level subscription (#2b) re-POSTed and verified against the new domain. Old Vercel alias removed.
+- Owner then saved Meta screen #9 with the new callback + verify token. Resend domain `mail.a58lab.com`
+  created (Tokyo), records at Namecheap are now **CNAMEs** (`rsend.mail`, `send.mail` -> `*.forge.rmta.net`) plus DKIM TXT —
+  Resend no longer asks for the old `MX rsend.mail` record. Resend reports **Verified** (all 3 records green, 2026-09-17 13:26). Old `mail.leads-alchemy.online` domain deleted from Resend.
+- **`vercel --prod` from the local checkout shipped the local `.env` into production** (Auth.js then reported
+  `Provider with id "resend" not found. Available providers: [nodemailer]` because `.env` sets `EMAIL_SERVER`
+  for Mailpit). `.gitignore` alone did not stop the upload. Fixed with a `.vercelignore` (`.env*`, `!.env.example`)
+  and a redeploy. Prefer deploying via the GitHub integration; if using the CLI, keep `.vercelignore`.
+- The Graph `subscriptions` endpoint takes the **Facebook** app ID (`2901649213548346`) with `FACEBOOK_APP_SECRET`,
+  not the Instagram app ID — the Instagram ID returns `Invalid application ID`.
+
 **Railway**
 - Start/Build command fields **silently discard input if you press Tab.** Press **Enter**. Our
   first deploy came up "Online" while running `next start` instead of the worker — looked
@@ -360,10 +418,10 @@ Everything infrastructural is **done**. What remains needs a human (OAuth consen
 
 | # | Task | Who |
 |---|---|---|
-| 1 | **Log in** at `https://openreply.leads-alchemy.online/login` — magic link now arrives by real email via Resend, not Mailpit | owner |
+| 1 | **Log in** at `https://openreply.a58lab.com/login` — magic link now arrives by real email via Resend, not Mailpit | owner |
 | 2 | **Connect Instagram** — production Postgres is a brand-new database: no account, no campaigns. This is an OAuth consent on the owner's account. | owner |
 | 3 | **Rebuild campaigns** there (nothing migrates from local) | owner |
-| 4 | Re-test end to end on the new domain: comment→DM **and** story→DM | both |
+| ~~4~~ | ~~Re-test end to end on the new domain~~ — **done 2026-08-22**, both paths pass, see §4.4 | — |
 | 5 | Retire ngrok once #4 passes: stop the tunnel, drop the ngrok OAuth redirect URI from Meta | either |
 
 **Done this session:** Redis public access · Vercel project + env + deploy · DNS A record ·

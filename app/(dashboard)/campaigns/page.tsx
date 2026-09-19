@@ -33,7 +33,16 @@ interface Campaign {
   followPromptMessage: string | null;
   followPromptButtonLabel: string | null;
   isActive: boolean;
+  archivedAt: string | null;
+  folderId: string | null;
   wholeWordMatch: boolean;
+  dmTriggerEnabled: boolean;
+  storyReplyTriggerEnabled: boolean;
+  storyId: string | null;
+  linkButtonLabel: string | null;
+  followUpEnabled: boolean;
+  followUpMessage: string | null;
+  followUpDelayMinutes: number;
   instagramAccountId: string;
   instagramAccount: {
     username: string;
@@ -62,6 +71,14 @@ interface Campaign {
   };
 }
 
+interface Folder {
+  id: string;
+  name: string;
+  _count: { automations: number };
+}
+
+type FolderFilter = "all" | "unfiled" | (string & {});
+
 export default function CampaignsPage() {
   const router = useRouter();
   const [automations, setAutomations] = useState<Campaign[]>([]);
@@ -81,9 +98,23 @@ export default function CampaignsPage() {
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState<"all" | "active" | "paused">(
-    "all"
-  );
+  const [statusFilter, setStatusFilter] = useState<
+    "all" | "active" | "paused" | "archived"
+  >("all");
+  const [folders, setFolders] = useState<Folder[]>([]);
+  const [folderFilter, setFolderFilter] = useState<FolderFilter>("all");
+  const [folderMenuOpen, setFolderMenuOpen] = useState(false);
+  const [moveMenuOpenId, setMoveMenuOpenId] = useState<string | null>(null);
+
+  const fetchFolders = useCallback(async () => {
+    try {
+      const res = await fetch("/api/folders", { cache: "no-store" });
+      const data = await res.json();
+      if (data.success) setFolders(data.data);
+    } catch (err) {
+      console.error("Failed to fetch folders:", err);
+    }
+  }, []);
 
   const fetchAutomations = useCallback(async () => {
     try {
@@ -116,9 +147,10 @@ export default function CampaignsPage() {
   useEffect(() => {
     const timer = window.setTimeout(() => {
       void fetchAutomations();
+      void fetchFolders();
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [fetchAutomations]);
+  }, [fetchAutomations, fetchFolders]);
 
   // Fetch fresh post thumbnails (and reel video URLs) for the accounts in view
   // and map them by postId. Cache-first so they show instantly on a return
@@ -212,6 +244,91 @@ export default function CampaignsPage() {
     }
   }
 
+  async function patchAutomation(id: string, body: Record<string, unknown>) {
+    const res = await fetch(`/api/automations?id=${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (!data.success) {
+      alert(data.error ?? "Update failed");
+      return false;
+    }
+    return true;
+  }
+
+  async function moveToFolder(id: string, folderId: string | null) {
+    setMenuOpenId(null);
+    setMoveMenuOpenId(null);
+    if (await patchAutomation(id, { folderId })) {
+      setAutomations((prev) =>
+        prev.map((a) => (a.id === id ? { ...a, folderId } : a))
+      );
+      void fetchFolders();
+    }
+  }
+
+  async function setArchived(id: string, archived: boolean) {
+    setMenuOpenId(null);
+    if (await patchAutomation(id, { archived })) {
+      setAutomations((prev) =>
+        prev.map((a) =>
+          a.id === id
+            ? {
+                ...a,
+                archivedAt: archived ? new Date().toISOString() : null,
+                isActive: archived ? false : a.isActive,
+              }
+            : a
+        )
+      );
+    }
+  }
+
+  async function createFolder() {
+    const name = prompt("Folder name (e.g. September)")?.trim();
+    if (!name) return;
+    const res = await fetch("/api/folders", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    const data = await res.json();
+    if (data.success) {
+      await fetchFolders();
+      setFolderFilter(data.data.id);
+    } else alert(data.error ?? "Could not create folder");
+  }
+
+  async function renameFolder(folder: Folder) {
+    setFolderMenuOpen(false);
+    const name = prompt("Rename folder", folder.name)?.trim();
+    if (!name || name === folder.name) return;
+    await fetch(`/api/folders?id=${folder.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    void fetchFolders();
+  }
+
+  async function deleteFolder(folder: Folder) {
+    setFolderMenuOpen(false);
+    if (
+      !confirm(
+        `Delete folder "${folder.name}"? Its campaigns are kept and become unfiled.`
+      )
+    )
+      return;
+    await fetch(`/api/folders?id=${folder.id}`, { method: "DELETE" });
+    setFolderFilter("all");
+    setAutomations((prev) =>
+      prev.map((a) => (a.folderId === folder.id ? { ...a, folderId: null } : a))
+    );
+    void fetchFolders();
+  }
+
   async function copyReelUrl(auto: Campaign) {
     setMenuOpenId(null);
     if (!auto.postUrl) return;
@@ -246,6 +363,8 @@ export default function CampaignsPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name: `${auto.name} copy`,
+          goal: auto.goal,
+          folderId: auto.folderId,
           instagramAccountId: auto.instagramAccountId,
           postId: specific ? auto.postId : null,
           postUrl: specific ? auto.postUrl : null,
@@ -253,7 +372,14 @@ export default function CampaignsPage() {
           pendingNextReel: auto.pendingNextReel,
           matchAnyWord: auto.matchAnyWord,
           keywords: auto.keywords,
+          dmTriggerEnabled: auto.dmTriggerEnabled,
+          storyReplyTriggerEnabled: auto.storyReplyTriggerEnabled,
+          storyId: auto.storyId,
           dmMessage: auto.dmMessage,
+          linkButtonLabel: auto.linkButtonLabel,
+          followUpEnabled: auto.followUpEnabled,
+          followUpMessage: auto.followUpMessage,
+          followUpDelayMinutes: auto.followUpDelayMinutes,
           openingDmEnabled: auto.openingDmEnabled,
           openingDmMessage: auto.openingDmMessage,
           openingDmButtonLabel: auto.openingDmButtonLabel,
@@ -270,8 +396,10 @@ export default function CampaignsPage() {
         }),
       });
       const data = await res.json();
-      if (data.success) void fetchAutomations();
-      else console.error("Duplicate failed:", data.error);
+      if (data.success) {
+        void fetchAutomations();
+        void fetchFolders();
+      } else console.error("Duplicate failed:", data.error);
     } catch (err) {
       console.error("Failed to duplicate:", err);
     }
@@ -289,8 +417,19 @@ export default function CampaignsPage() {
 
   const query = search.trim().toLowerCase();
   const filtered = automations.filter((a) => {
+    // Archived items live only under the Archived tab.
+    if (statusFilter === "archived") {
+      if (!a.archivedAt) return false;
+    } else if (a.archivedAt) return false;
     if (statusFilter === "active" && !a.isActive) return false;
     if (statusFilter === "paused" && a.isActive) return false;
+    if (folderFilter === "unfiled" && a.folderId) return false;
+    if (
+      folderFilter !== "all" &&
+      folderFilter !== "unfiled" &&
+      a.folderId !== folderFilter
+    )
+      return false;
     if (!query) return true;
     return (
       a.name.toLowerCase().includes(query) ||
@@ -335,6 +474,86 @@ export default function CampaignsPage() {
         </div>
       </div>
 
+      {/* Folders */}
+      {automations.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2">
+          {(
+            [
+              { id: "all" as const, name: "All" },
+              ...folders,
+              { id: "unfiled" as const, name: "Unfiled" },
+            ] as { id: FolderFilter; name: string; _count?: { automations: number } }[]
+          ).map((f) => (
+            <button
+              key={f.id}
+              type="button"
+              onClick={() => setFolderFilter(f.id)}
+              className={`rounded-full border px-3 py-1 text-sm transition-colors ${
+                folderFilter === f.id
+                  ? "border-accent/40 bg-accent/10 font-medium text-foreground"
+                  : "border-border text-muted hover:border-border-hover hover:text-foreground"
+              }`}
+            >
+              {f.name}
+              {f._count ? (
+                <span className="ml-1 text-xs text-zinc-500">
+                  {f._count.automations}
+                </span>
+              ) : null}
+            </button>
+          ))}
+          {folderFilter !== "all" && folderFilter !== "unfiled" && (
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setFolderMenuOpen((v) => !v)}
+                aria-label="Folder actions"
+                className="px-2 py-1 rounded text-lg leading-none text-muted hover:text-foreground"
+              >
+                ⋯
+              </button>
+              {folderMenuOpen && (
+                <>
+                  <div
+                    className="fixed inset-0 z-10"
+                    onClick={() => setFolderMenuOpen(false)}
+                  />
+                  <div className="absolute left-0 z-20 mt-1 w-36 overflow-hidden rounded-lg border border-border bg-surface shadow-lg">
+                    {(() => {
+                      const folder = folders.find((f) => f.id === folderFilter);
+                      if (!folder) return null;
+                      return (
+                        <>
+                          <button
+                            onClick={() => void renameFolder(folder)}
+                            className="block w-full px-3 py-2 text-left text-sm text-foreground hover:bg-surface-hover"
+                          >
+                            Rename
+                          </button>
+                          <button
+                            onClick={() => void deleteFolder(folder)}
+                            className="block w-full px-3 py-2 text-left text-sm text-error hover:bg-surface-hover"
+                          >
+                            Delete folder
+                          </button>
+                        </>
+                      );
+                    })()}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+          <button
+            type="button"
+            onClick={() => void createFolder()}
+            className="rounded-full border border-dashed border-border px-3 py-1 text-sm text-muted hover:border-border-hover hover:text-foreground"
+          >
+            + New folder
+          </button>
+        </div>
+      )}
+
       {/* Search + status filter */}
       {automations.length > 0 && (
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
@@ -345,7 +564,7 @@ export default function CampaignsPage() {
             className="w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-foreground placeholder:text-zinc-500 focus:border-accent/40 focus:outline-none"
           />
           <div className="inline-flex shrink-0 rounded-lg bg-surface p-1">
-            {(["all", "active", "paused"] as const).map((s) => (
+            {(["all", "active", "paused", "archived"] as const).map((s) => (
               <button
                 key={s}
                 type="button"
@@ -382,7 +601,9 @@ export default function CampaignsPage() {
       {/* No matches for the current filter */}
       {automations.length > 0 && filtered.length === 0 && (
         <div className="panel rounded p-8 text-center text-sm text-muted">
-          No campaigns match your search.
+          {statusFilter === "archived"
+            ? "Nothing archived here."
+            : "No campaigns match your search."}
         </div>
       )}
 
@@ -455,6 +676,11 @@ export default function CampaignsPage() {
                   >
                     {auto.isActive ? "Active" : "Paused"}
                   </span>
+                  {auto.archivedAt && (
+                    <span className="shrink-0 rounded-full bg-zinc-500/10 px-2 py-0.5 text-xs font-medium text-muted">
+                      Archived
+                    </span>
+                  )}
                   {auto.pendingNextReel && (
                     <span className="shrink-0 rounded-full bg-amber-500/10 px-2 py-0.5 text-xs font-medium text-warning">
                       Waiting for next reel
@@ -541,7 +767,8 @@ export default function CampaignsPage() {
                     {copiedId === auto.id ? "Copied!" : "Copy URL"}
                   </button>
                 )}
-                {/* Toggle */}
+                {/* Toggle (archived campaigns must be restored first) */}
+                {!auto.archivedAt && (
                 <button
                   onClick={() => toggleActive(auto.id, auto.isActive)}
                   className={`
@@ -556,6 +783,7 @@ export default function CampaignsPage() {
                     `}
                   />
                 </button>
+                )}
 
                 {/* Kebab menu */}
                 <div className="relative">
@@ -572,14 +800,59 @@ export default function CampaignsPage() {
                     <>
                       <div
                         className="fixed inset-0 z-10"
-                        onClick={() => setMenuOpenId(null)}
+                        onClick={() => {
+                          setMenuOpenId(null);
+                          setMoveMenuOpenId(null);
+                        }}
                       />
-                      <div className="absolute right-0 z-20 mt-1 w-36 overflow-hidden rounded-lg border border-border bg-surface shadow-lg">
+                      <div className="absolute right-0 z-20 mt-1 w-44 overflow-hidden rounded-lg border border-border bg-surface shadow-lg">
                         <button
                           onClick={() => void duplicateAutomation(auto)}
                           className="block w-full px-3 py-2 text-left text-sm text-foreground hover:bg-surface-hover"
                         >
                           Duplicate
+                        </button>
+                        <button
+                          onClick={() =>
+                            setMoveMenuOpenId((cur) =>
+                              cur === auto.id ? null : auto.id
+                            )
+                          }
+                          className="flex w-full items-center justify-between px-3 py-2 text-left text-sm text-foreground hover:bg-surface-hover"
+                        >
+                          Move to folder
+                          <span className="text-xs text-muted">▸</span>
+                        </button>
+                        {moveMenuOpenId === auto.id && (
+                          <div className="border-t border-border bg-background/40">
+                            {[
+                              { id: null as string | null, name: "Unfiled" },
+                              ...folders,
+                            ].map((f) => (
+                              <button
+                                key={f.id ?? "unfiled"}
+                                disabled={f.id === auto.folderId}
+                                onClick={() => void moveToFolder(auto.id, f.id)}
+                                className="block w-full px-5 py-1.5 text-left text-sm text-foreground hover:bg-surface-hover disabled:text-muted"
+                              >
+                                {f.id === auto.folderId ? "✓ " : ""}
+                                {f.name}
+                              </button>
+                            ))}
+                            {folders.length === 0 && (
+                              <p className="px-5 py-1.5 text-xs text-muted">
+                                No folders yet
+                              </p>
+                            )}
+                          </div>
+                        )}
+                        <button
+                          onClick={() =>
+                            void setArchived(auto.id, !auto.archivedAt)
+                          }
+                          className="block w-full px-3 py-2 text-left text-sm text-foreground hover:bg-surface-hover"
+                        >
+                          {auto.archivedAt ? "Restore" : "Archive"}
                         </button>
                         <button
                           onClick={() => {

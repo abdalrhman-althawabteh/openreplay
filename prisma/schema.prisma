@@ -88,6 +88,7 @@ model Workspace {
   calendars         Calendar[]
   bookings          Booking[]
   forms             Form[]
+  folders           Folder[]
   formSubmissions   FormSubmission[]
 
   @@index([ownerId])
@@ -216,12 +217,18 @@ model Automation {
   wholeWordMatch           Boolean  @default(true)
   reportShareSlug          String?  @unique
   reportShareEnabled       Boolean  @default(true)
+  // Optional organisational folder (one flat level, e.g. "September").
+  folderId                 String?
+  // Set when archived. Archiving also pauses (isActive=false), so every
+  // matcher that filters on isActive already ignores archived automations.
+  archivedAt               DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   workspace        Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   instagramAccount InstagramAccount @relation(fields: [instagramAccountId], references: [id], onDelete: Cascade)
+  folder           Folder?          @relation(fields: [folderId], references: [id], onDelete: SetNull)
   dmLogs           DmLog[]
   trackedLinks     TrackedLink[]
   linkClicks       LinkClick[]
@@ -229,6 +236,21 @@ model Automation {
   @@index([workspaceId])
   @@index([instagramAccountId])
   @@index([postId])
+  @@index([folderId])
+}
+
+// A flat folder for grouping campaigns / story automations (both are
+// Automation rows). Deleting a folder unfiles its automations (SetNull).
+model Folder {
+  id          String   @id @default(cuid())
+  workspaceId String
+  name        String
+  createdAt   DateTime @default(now())
+
+  workspace   Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  automations Automation[]
+
+  @@index([workspaceId])
 }
 
 model DmLog {
