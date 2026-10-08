@@ -78,3 +78,32 @@ describe("tracked link redirect route", () => {
     expect(mockPrisma.linkClick.create).not.toHaveBeenCalled();
   });
 });
+
+describe("in-app browser escape", () => {
+  async function open(destinationUrl: string, userAgent: string) {
+    mockPrisma.trackedLink.findUnique.mockResolvedValue({
+      id: "l", workspaceId: "w", automationId: "a", destinationUrl,
+      automation: { instagramAccountId: "i" },
+    });
+    const response = await GET(
+      new Request("https://x.com/r/s", { headers: { "user-agent": userAgent } }) as Parameters<typeof GET>[0],
+      { params: Promise.resolve({ slug: "s" }) }
+    );
+    expect(response.status).toBe(200);
+    expect(mockPrisma.linkClick.create).toHaveBeenCalled();
+    return response.text();
+  }
+  const android = "Mozilla/5.0 (Linux; Android 14) Instagram 300.0";
+  const iphone = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0) Instagram 300.0";
+
+  it("hands Android an intent so the matching app or browser opens", async () => {
+    expect(await open("https://www.skool.com/abc", android)).toContain(
+      "intent://www.skool.com/abc#Intent;scheme=https;S.browser_fallback_url=https%3A%2F%2Fwww.skool.com%2Fabc;end"
+    );
+  });
+
+  it("sends iPhone YouTube links to the app and the rest to Safari", async () => {
+    expect(await open("https://www.youtube.com/watch?v=X", iphone)).toContain("youtube://www.youtube.com/watch?v=X");
+    expect(await open("https://www.skool.com/abc", iphone)).toContain("x-safari-https://www.skool.com/abc");
+  });
+});
