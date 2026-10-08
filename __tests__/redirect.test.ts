@@ -102,8 +102,10 @@ describe("in-app browser escape", () => {
     );
   });
 
-  it("sends iPhone YouTube links to the app and the rest to Safari", async () => {
-    expect(await open("https://www.youtube.com/watch?v=X", iphone)).toContain("youtube://www.youtube.com/watch?v=X");
-    expect(await open("https://www.skool.com/abc", iphone)).toContain("x-safari-https://www.skool.com/abc");
+  it("gives iPhone a plain link to tap, so iOS can hand it to the app", async () => {
+    const page = await open("https://www.youtube.com/watch?v=X&t=1", iphone);
+    expect(page).toContain('href="https://www.youtube.com/watch?v=X&amp;t=1"');
+    expect(page).toContain("Open on youtube.com");
+    expect(page).not.toContain("<script>");
   });
 });
